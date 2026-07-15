@@ -233,6 +233,6 @@ def get_screen_resolution(device):
 
 
 def open_hinge(device):
-    package_name = "co.match.android.matchhinge"
+    package_name = "co.hinge.app"
     device.shell(f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1")
     time.sleep(5)
