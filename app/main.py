@@ -18,6 +18,7 @@ from helper_functions import (
     connect_device_remote,
     get_screen_resolution,
     open_hinge,
+    open_discover,
     swipe,
     capture_screenshot,
     extract_text_from_image,  # If you want to keep your original OCR or unify with text_analyzer
@@ -76,7 +77,7 @@ def main():
     ]
 
     open_hinge(device=device)
-    time.sleep(5)
+    open_discover(device, width, height)
 
     previous_profile_text = ""
 

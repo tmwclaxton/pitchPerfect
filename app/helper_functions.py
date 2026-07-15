@@ -236,3 +236,10 @@ def open_hinge(device):
     package_name = "co.hinge.app"
     device.shell(f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1")
     time.sleep(5)
+
+
+def open_discover(device, width, height):
+    discover_x = int(width * 0.10)
+    discover_y = int(height * 0.96)
+    tap(device, discover_x, discover_y)
+    time.sleep(3)
