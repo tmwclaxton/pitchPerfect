@@ -202,12 +202,16 @@ def do_comparision(profile_image, sample_images):
     return best_score if best_score != float("inf") else float("inf")
 
 
-def generate_comment(profile_text):
+def generate_comment(profile_text, vision_notes=None):
+    vision_context = ""
+    if vision_notes:
+        vision_context = f"\n\nPhoto analysis:\n{vision_notes}"
+
     prompt = f"""
     Based on the following profile description, generate a 1-line friendly and personalized comment asking them to go out with you:
 
     Profile Description:
-    {profile_text}
+    {profile_text}{vision_context}
 
     Comment:
     """

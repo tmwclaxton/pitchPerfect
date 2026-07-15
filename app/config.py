@@ -7,3 +7,9 @@ load_dotenv()
 NANOGPT_API_KEY = os.getenv("NANOGPT_API_KEY")
 NANOGPT_BASE_URL = os.getenv("NANOGPT_BASE_URL", "https://nano-gpt.com/api/v1")
 NANOGPT_MODEL = os.getenv("NANOGPT_MODEL", "openai/gpt-4.1-mini")
+NANOGPT_VISION_MODEL = os.getenv(
+    "NANOGPT_VISION_MODEL", "openai/gpt-4.1-mini:speed"
+)
+PROFILE_MIN_ATTRACTIVENESS = float(os.getenv("PROFILE_MIN_ATTRACTIVENESS", "6"))
+PROFILE_MIN_SLIMNESS = float(os.getenv("PROFILE_MIN_SLIMNESS", "5"))
+PROFILE_IMAGE_COUNT = int(os.getenv("PROFILE_IMAGE_COUNT", "3"))

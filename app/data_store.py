@@ -6,9 +6,18 @@ from datetime import datetime
 
 DATA_FILE = "generated_comments.json"
 FEEDBACK_FILE = "feedback_records.json"
+PROFILE_SCORES_FILE = "profile_scores.json"
 
 
-def store_generated_comment(comment_id, profile_text, generated_comment, style_used):
+def store_generated_comment(
+    comment_id,
+    profile_text,
+    generated_comment,
+    style_used,
+    profile_scores=None,
+    decision=None,
+    image_paths=None,
+):
     """
     Store details about each generated comment for future analysis.
     """
@@ -18,6 +27,9 @@ def store_generated_comment(comment_id, profile_text, generated_comment, style_u
         "profile_text": profile_text,
         "generated_comment": generated_comment,
         "style_used": style_used,
+        "profile_scores": profile_scores,
+        "decision": decision,
+        "image_paths": image_paths or [],
     }
 
     if not os.path.exists(DATA_FILE):
@@ -25,6 +37,27 @@ def store_generated_comment(comment_id, profile_text, generated_comment, style_u
             json.dump([], f)
 
     with open(DATA_FILE, "r+") as f:
+        data = json.load(f)
+        data.append(record)
+        f.seek(0)
+        json.dump(data, f, indent=2)
+
+
+def store_profile_scores(comment_id, profile_text, scores, decision, image_paths):
+    record = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "comment_id": comment_id,
+        "profile_text": profile_text,
+        "scores": scores,
+        "decision": decision,
+        "image_paths": image_paths,
+    }
+
+    if not os.path.exists(PROFILE_SCORES_FILE):
+        with open(PROFILE_SCORES_FILE, "w") as f:
+            json.dump([], f)
+
+    with open(PROFILE_SCORES_FILE, "r+") as f:
         data = json.load(f)
         data.append(record)
         f.seek(0)

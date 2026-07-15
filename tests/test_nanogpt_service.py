@@ -1,3 +1,4 @@
+import base64
 import sys
 import unittest
 from pathlib import Path
@@ -73,6 +74,51 @@ class NanoGptServiceTest(unittest.TestCase):
     def test_api_key_is_required(self):
         with self.assertRaisesRegex(ValueError, "NANOGPT_API_KEY is required"):
             NanoGptService(api_key="")
+
+    def test_chat_json_requests_structured_output(self):
+        session = FakeSession(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"attractiveness": 8, "slimness": 7, "quirkiness": 5, "notes": "Bright"}'
+                        }
+                    }
+                ]
+            }
+        )
+        service = NanoGptService(api_key="test-key", session=session)
+
+        result = service.chat_json([{"role": "user", "content": "Score this profile"}])
+
+        self.assertEqual(8, result["attractiveness"])
+        self.assertEqual({"type": "json_object"}, session.request["json"]["response_format"])
+
+    def test_chat_with_images_embeds_base64_payload(self):
+        image_path = Path(__file__).parent / "fixtures" / "tiny.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            )
+        )
+
+        session = FakeSession(
+            {"choices": [{"message": {"content": '{"attractiveness": 6}'}}]}
+        )
+        service = NanoGptService(api_key="test-key", session=session)
+
+        result = service.chat_with_images(
+            prompt="Score this",
+            image_paths=[str(image_path)],
+            system_prompt="Return JSON",
+            json_response=True,
+        )
+
+        self.assertEqual(6, result["attractiveness"])
+        user_content = session.request["json"]["messages"][1]["content"]
+        self.assertEqual("text", user_content[0]["type"])
+        self.assertTrue(user_content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
 
 
 if __name__ == "__main__":
