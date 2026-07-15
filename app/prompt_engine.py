@@ -1,10 +1,8 @@
 # app/prompt_engine.py
 
-import openai
 import random
-from config import OPENAI_API_KEY
 
-openai.api_key = OPENAI_API_KEY
+from nanogpt_service import NanoGptService
 
 COMEDIC_KEY = "comedic"
 FLIRTY_KEY = "flirty"
@@ -88,24 +86,24 @@ def generate_prompt(style_template: str, keywords: list, sentiment: str) -> str:
     return system_prompt
 
 
-def call_gpt4(prompt: str, temperature: float = 0.7, max_tokens: int = 150) -> str:
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
+def call_nanogpt(
+    prompt: str, temperature: float = 0.7, max_tokens: int = 150
+) -> str:
+    return NanoGptService().chat(
+        [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": prompt},
         ],
-        max_tokens=max_tokens,
         temperature=temperature,
+        max_tokens=max_tokens,
     )
-    return response.choices[0].message["content"].strip()
 
 
 def generate_comment(profile_text: str) -> str:
     """
     1. Clean & analyze text
     2. Choose a template
-    3. Call GPT-4
+    3. Call NanoGPT
     Return the final comment string.
     """
     from text_analyzer import clean_text, extract_keywords, analyze_sentiment
@@ -116,5 +114,5 @@ def generate_comment(profile_text: str) -> str:
 
     style_template = choose_template(sentiment, keywords)
     final_prompt = generate_prompt(style_template, keywords, sentiment)
-    generated_text = call_gpt4(final_prompt)
+    generated_text = call_nanogpt(final_prompt)
     return generated_text

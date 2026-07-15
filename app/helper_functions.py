@@ -4,14 +4,8 @@ from PIL import Image
 import numpy as np
 import cv2
 import pytesseract
-import openai
-from dotenv import load_dotenv
-import os
-import cv2
-import numpy as np
 
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+from nanogpt_service import NanoGptService
 
 
 def find_icon(
@@ -217,21 +211,17 @@ def generate_comment(profile_text):
 
     Comment:
     """
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
+    return NanoGptService().chat(
+        [
             {
                 "role": "system",
                 "content": "You are a friendly and likable person who is witty and humorous",
             },
             {"role": "user", "content": prompt},
         ],
-        max_tokens=1500,
         temperature=0.7,
+        max_tokens=1500,
     )
-
-    comment = response.choices[0].message["content"].strip()
-    return comment
 
 
 def get_screen_resolution(device):

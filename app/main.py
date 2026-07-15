@@ -3,7 +3,6 @@
 import asyncio
 import time
 import os
-import openai
 import cv2
 import uuid
 from dotenv import load_dotenv
@@ -12,7 +11,6 @@ from ppadb.client import Client as AdbClient
 
 # Import your prompt engine weight updater
 from prompt_engine import update_template_weights
-from config import OPENAI_API_KEY
 
 # Import your existing helper functions
 from helper_functions import (
@@ -36,9 +34,6 @@ from data_store import (
     store_feedback,
     calculate_template_success_rates,
 )
-
-openai.api_key = OPENAI_API_KEY
-
 
 # async def main():
 def main():
@@ -124,7 +119,7 @@ def main():
             and y_select_like_button is not None
         ):
             # Generate a comment using your advanced logic or the existing generate_comment
-            # For demonstration, let's assume your 'generate_comment' calls GPT-4, etc.
+            # Generate the comment through NanoGPT.
             comment = (
                 generate_comment(current_profile_text) or "Hey, I'd love to meet up!"
             )

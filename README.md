@@ -5,7 +5,7 @@ This project also demonstrates how to automate interactions with Hinge (a dating
 - **ADB (Android Debug Bridge)**: Automate device actions such as taps, swipes, and text input.
 - **Computer Vision (OpenCV)**: Detect and locate UI elements on the screen using feature-based and template matching methods.
 - **OCR (Tesseract via pytesseract)**: Extract text from screenshots to analyze profile descriptions or other textual content.
-- **LLM (OpenAI GPT-4)**: Generate personalized, human-like comments based on extracted text content.
+- **LLM (NanoGPT)**: Generate personalized, human-like comments based on extracted text content.
 
 By integrating these components, the script can make automated decisions (like or dislike profiles) and even respond with a custom-generated pickup line or comment.
 
@@ -19,7 +19,7 @@ By integrating these components, the script can make automated decisions (like o
 - **Capture Screenshots**: Save current device screen state to an image file.
 - **UI Element Detection**: Locate buttons or icons using ORB feature matching and fallback template matching.
 - **Text Extraction**: Use Tesseract OCR to read text content from on-screen images.
-- **Comment Generation**: Use GPT-4 to create personalized, one-line comments based on the extracted profile text.
+- **Comment Generation**: Use NanoGPT to create personalized, one-line comments based on the extracted profile text.
 - **Automated Actions**: Simulate user input (taps, swipes, text entry) to interact with the app, such as liking or disliking profiles and inputting custom messages.
 
 ## Requirements
@@ -54,9 +54,9 @@ By integrating these components, the script can make automated decisions (like o
     ```bash
     pip install python-dotenv
     ```
-  - [openai](https://pypi.org/project/openai/) for GPT-4 integration:
+  - [requests](https://pypi.org/project/requests/) for NanoGPT API requests:
     ```bash
-    pip install openai
+    pip install requests
     ```
 
 - **Tesseract OCR Engine**:
@@ -65,10 +65,13 @@ By integrating these components, the script can make automated decisions (like o
 
 ## Setup
 
-1. **Add your OpenAI API Key**:
-   Create a `.env` file in the project directory to add your OpenAI key and phone's IP address:
+1. **Add your NanoGPT configuration**:
+   Copy `.env-template` to `.env`, then add your NanoGPT key and phone's IP address:
    ```env
-   OPENAI_API_KEY=your-api-key
+   NANOGPT_API_KEY=your-api-key
+   NANOGPT_BASE_URL=https://nano-gpt.com/api/v1
+   NANOGPT_MODEL=openai/gpt-4.1-mini
+   DEVICE_IP=your-phone-ip
    ```
 2. **Build the docker container**:
 

@@ -11,7 +11,11 @@ main_step = Step(
     name="run-adb-ocr",
     image=CONTAINER_IMAGE,
     command=["python", "main.py"],
-    env={"OPENAI_API_KEY": "{{ env.OPENAI_API_KEY }}"},  # or reference a secret
+    env={
+        "NANOGPT_API_KEY": "{{ env.NANOGPT_API_KEY }}",
+        "NANOGPT_BASE_URL": "{{ env.NANOGPT_BASE_URL }}",
+        "NANOGPT_MODEL": "{{ env.NANOGPT_MODEL }}",
+    },
     # You could also pass volumes, etc. if your pipeline needs them
 )
 
