@@ -104,7 +104,7 @@ def _scroll_matches_list(device, width: int, height: int) -> bool:
         int(height * 0.35),
         350,
     )
-    time.sleep(0.85)
+    time.sleep(0.25)
     return True
 
 
@@ -127,9 +127,9 @@ def _scroll_matches_to_top(device, width: int, height: int, passes: int = 3) -> 
             int(height * 0.32),
             width // 2,
             int(height * 0.88),
-            280,
+            220,
         )
-        time.sleep(0.45)
+        time.sleep(0.2)
 
 
 def run_sync_live(
@@ -147,8 +147,8 @@ def run_sync_live(
         return
     width, height = get_screen_resolution(device)
 
-    open_hinge(device=device, settle_s=2.5)
-    open_matches(device, width, height, settle_s=1.0)
+    open_hinge(device=device, settle_s=0.6)
+    open_matches(device, width, height, settle_s=0.3)
     _scroll_matches_to_top(device, width, height)
 
     run_id = start_run(
@@ -248,17 +248,23 @@ def run_sync_live(
                 print(f"  skip: not on Matches list before {conversation.name}")
                 continue
 
-            open_conversation(device, conversation, settle_s=1.2)
-            if not ensure_hinge_foreground(device, settle_s=2.0):
-                print("  skip: could not stay in Hinge after opening chat")
-                recover_to_matches(
-                    device, width, height, reason="left Hinge after opening chat"
-                )
-                continue
-
+            open_conversation(device, conversation, settle_s=0.35)
             open_ctx = classify_device_screen(
                 device, height, expect_match=conversation.name
             )
+            if open_ctx.kind == "off_hinge":
+                print("  skip: could not stay in Hinge after opening chat")
+                if not ensure_hinge_foreground(device, settle_s=0.6):
+                    recover_to_matches(
+                        device,
+                        width,
+                        height,
+                        reason="left Hinge after opening chat",
+                    )
+                    continue
+                open_ctx = classify_device_screen(
+                    device, height, expect_match=conversation.name
+                )
             if open_ctx.is_feed or open_ctx.is_lost_for_match_sync:
                 print(
                     f"  skip: landed on {open_ctx.kind} instead of "
@@ -405,8 +411,8 @@ def run_sync_live(
                     )
                     continue
 
-            press_back(device, settle_s=0.5)
-            time.sleep(0.35)
+            press_back(device, settle_s=0.2, check_hinge=False)
+            time.sleep(0.15)
             recover_to_matches(
                 device,
                 width,

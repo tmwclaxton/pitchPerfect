@@ -462,7 +462,7 @@ def collect_chat_history(
             int(height * 0.78),
             280,
         )
-        time.sleep(max(0.35, float(scroll_pause_s)))
+        time.sleep(max(0.15, min(0.35, float(scroll_pause_s))))
         if lost_context or not still_in_match_chat():
             break
         added = ingest_screen()
@@ -485,9 +485,9 @@ def collect_chat_history(
                 int(height * 0.75),
                 width // 2,
                 int(height * 0.35),
-                250,
+                200,
             )
-            time.sleep(0.35)
+            time.sleep(0.15)
 
     return ConversationHistory(name=name, messages=ordered)
 
@@ -496,10 +496,10 @@ def open_conversation(
     device,
     conversation: ConversationPreview,
     *,
-    settle_s: float = 1.2,
+    settle_s: float = 0.35,
 ) -> None:
     tap_bounds(device, conversation.bounds)
-    time.sleep(max(0.4, float(settle_s)))
+    time.sleep(max(0.2, float(settle_s)))
 
 
 def conversation_open_for_match(device, match_name: str, *, height: int = 2800) -> bool:
@@ -669,4 +669,4 @@ def ensure_matches_your_turn(device, width: int, height: int) -> None:
             int(height * 0.8),
             300,
         )
-        time.sleep(1)
+        time.sleep(0.3)

@@ -84,7 +84,7 @@ def _scroll_matches_list(device, width: int, height: int) -> bool:
         int(height * 0.35),
         350,
     )
-    time.sleep(0.55)
+    time.sleep(0.25)
     return True
 
 
@@ -107,9 +107,9 @@ def _scroll_matches_to_top(device, width: int, height: int, passes: int = 3) -> 
             int(height * 0.32),
             width // 2,
             int(height * 0.88),
-            280,
+            220,
         )
-        time.sleep(0.35)
+        time.sleep(0.2)
 
 
 def _capture_dump(
@@ -176,21 +176,16 @@ def _capture_chat_scrolls(
     frames += 1
 
     for _ in range(max_scrolls):
-        pre = classify_device_screen(device, height, expect_match=match_name)
-        if not pre.is_match_conversation or pre.is_feed:
-            print(
-                f"  chat capture stop: lost context ({pre.kind}: {pre.detail})"
-            )
-            break
+        # One dump after swipe serves both stagnation check and context guard.
         swipe(
             device,
             width // 2,
             int(height * 0.32),
             width // 2,
             int(height * 0.78),
-            280,
+            220,
         )
-        time.sleep(0.45)
+        time.sleep(0.2)
         xml = dump_ui_xml(device)
         nodes = parse_ui_nodes(xml)
         if not on_match_conversation_screen(
@@ -253,7 +248,6 @@ def _capture_profile_scrolls(
         if not open_profile_tab(device):
             print("  profile capture skipped: could not tap Profile tab")
             return 0
-        time.sleep(0.7)
         xml = dump_ui_xml(device)
         nodes = parse_ui_nodes(xml)
         if not on_match_profile_screen(
@@ -287,36 +281,15 @@ def _capture_profile_scrolls(
     frames += 1
 
     for _ in range(max_scrolls):
-        pre_xml = dump_ui_xml(device)
-        pre_nodes = parse_ui_nodes(pre_xml)
-        pre_ctx = classify_hinge_screen(
-            pre_nodes, height, xml_text=pre_xml, expect_match=match_name
-        )
-        if pre_ctx.is_feed:
-            print("  profile capture stop: wandered onto a feed")
-            break
-        if not (
-            on_match_profile_screen(
-                pre_nodes, height, match_name, xml_text=pre_xml
-            )
-            or on_match_conversation_screen(
-                pre_nodes, height, match_name, xml_text=pre_xml
-            )
-        ):
-            print(
-                f"  profile capture stop: lost match context "
-                f"({pre_ctx.kind}: {pre_ctx.detail})"
-            )
-            break
         swipe(
             device,
             width // 2,
             int(height * 0.72),
             width // 2,
             int(height * 0.36),
-            280,
+            220,
         )
-        time.sleep(0.45)
+        time.sleep(0.2)
         xml = dump_ui_xml(device)
         nodes = parse_ui_nodes(xml)
         ctx = classify_hinge_screen(
@@ -389,8 +362,8 @@ def run_capture(
         + (" + PNGs" if with_screenshots else " (XML only)")
     )
 
-    open_hinge(device=device, settle_s=2.0)
-    open_matches(device, width, height, settle_s=0.8)
+    open_hinge(device=device, settle_s=0.6)
+    open_matches(device, width, height, settle_s=0.3)
     _scroll_matches_to_top(device, width, height)
 
     # Baseline Matches list dump.
@@ -502,17 +475,21 @@ def run_capture(
                     print(f"  skip: not on Matches before {conversation.name}")
                     continue
 
-                open_conversation(device, conversation, settle_s=0.9)
-                if not ensure_hinge_foreground(device, settle_s=1.5):
-                    print("  skip: left Hinge after opening chat")
-                    recover_to_matches(
-                        device, width, height, reason="left Hinge after open"
-                    )
-                    continue
-
+                open_conversation(device, conversation, settle_s=0.35)
+                # Single dump after open: classify + off-Hinge recovery.
                 open_ctx = classify_device_screen(
                     device, height, expect_match=conversation.name
                 )
+                if open_ctx.kind == "off_hinge":
+                    print("  skip: left Hinge after opening chat")
+                    if not ensure_hinge_foreground(device, settle_s=0.6):
+                        recover_to_matches(
+                            device, width, height, reason="left Hinge after open"
+                        )
+                        continue
+                    open_ctx = classify_device_screen(
+                        device, height, expect_match=conversation.name
+                    )
                 if open_ctx.is_feed or open_ctx.is_lost_for_match_sync:
                     print(
                         f"  skip: landed on {open_ctx.kind} instead of "
@@ -595,8 +572,8 @@ def run_capture(
                         )
                         continue
 
-                press_back(device, settle_s=0.4)
-                time.sleep(0.25)
+                press_back(device, settle_s=0.2, check_hinge=False)
+                time.sleep(0.15)
                 recover_to_matches(
                     device,
                     width,

@@ -121,20 +121,29 @@ def is_hinge_xml(xml_text: str) -> bool:
     return HINGE_PACKAGE in packages
 
 
-def ensure_hinge_foreground(device, *, settle_s: float = 2.5) -> bool:
+def ensure_hinge_foreground(
+    device,
+    *,
+    settle_s: float = 0.8,
+    xml_text: Optional[str] = None,
+) -> bool:
     """
     If the phone left Hinge (e.g. Honor/Android Settings search), reopen it.
     Returns True when Hinge is foreground after the call.
+    Pass xml_text to reuse an existing dump (avoids an extra uiautomator dump).
     """
-    xml_text = dump_ui_xml(device)
+    # Fast path: dumpsys package check before expensive UI dump.
+    from helper_functions import hinge_is_foreground, open_hinge
+
+    if xml_text is None and hinge_is_foreground(device):
+        return True
+    if xml_text is None:
+        xml_text = dump_ui_xml(device)
     if is_hinge_xml(xml_text):
         return True
     packages = ", ".join(sorted(ui_packages(xml_text))[:4]) or "unknown"
     print(f"Left Hinge (foreground: {packages}); reopening co.hinge.app")
-    # Import lazily to avoid circular imports with helper_functions.
-    from helper_functions import open_hinge
-
-    open_hinge(device, settle_s=settle_s)
+    open_hinge(device, settle_s=settle_s, force=True)
     xml_text = dump_ui_xml(device)
     ok = is_hinge_xml(xml_text)
     if not ok:
@@ -630,7 +639,7 @@ def recover_to_matches(
             return True
         if ctx.kind == SCREEN_OFF_HINGE:
             print(f"  recovery: off Hinge ({ctx.detail}); reopening")
-            if not ensure_hinge_foreground(device, settle_s=2.0):
+            if not ensure_hinge_foreground(device, settle_s=0.8):
                 print("  recovery FAILED: could not reopen Hinge")
                 return False
             break
@@ -642,16 +651,16 @@ def recover_to_matches(
                 f"  recovery: Back from {ctx.kind}"
                 + (f" ({ctx.match_name})" if ctx.match_name else "")
             )
-            press_back(device, settle_s=0.45)
+            press_back(device, settle_s=0.2, check_hinge=False)
             continue
         print(f"  recovery: Back from {ctx.kind} ({ctx.detail}) [try {attempt + 1}]")
-        press_back(device, settle_s=0.45)
+        press_back(device, settle_s=0.2, check_hinge=False)
 
-    if not ensure_hinge_foreground(device, settle_s=2.0):
+    if not ensure_hinge_foreground(device, settle_s=0.8):
         print("  recovery FAILED: Hinge not foreground")
         return False
 
-    open_matches(device, width, height, settle_s=1.0)
+    open_matches(device, width, height, settle_s=0.35)
     ctx = classify_device_screen(device, height)
     if ctx.is_matches_list:
         print(f"  recovery OK: Matches list ({ctx.detail})")
@@ -661,8 +670,8 @@ def recover_to_matches(
     print(f"  recovery: still {ctx.kind}; forcing open_hinge + Matches")
     from helper_functions import open_hinge
 
-    open_hinge(device, settle_s=2.5)
-    open_matches(device, width, height, settle_s=1.0)
+    open_hinge(device, settle_s=0.8, force=True)
+    open_matches(device, width, height, settle_s=0.35)
     ctx = classify_device_screen(device, height)
     ok = ctx.is_matches_list
     if ok:
@@ -703,14 +712,14 @@ def open_matches(
     width: int,
     height: int,
     *,
-    settle_s: float = 1.0,
+    settle_s: float = 0.35,
     xml_text: Optional[str] = None,
 ) -> None:
     """Open the Matches tab (speech-bubble nav item)."""
     if xml_text is None or not is_hinge_xml(xml_text):
         xml_text = dump_ui_xml(device)
         if not is_hinge_xml(xml_text):
-            if not ensure_hinge_foreground(device):
+            if not ensure_hinge_foreground(device, settle_s=0.8):
                 return
             xml_text = dump_ui_xml(device)
 
@@ -721,10 +730,10 @@ def open_matches(
         if matches_list_visible(nodes, height):
             break
         if in_match_conversation(nodes):
-            press_back(device, settle_s=0.45)
+            press_back(device, settle_s=0.2, check_hinge=False)
             xml_text = dump_ui_xml(device)
             if not is_hinge_xml(xml_text):
-                if not ensure_hinge_foreground(device):
+                if not ensure_hinge_foreground(device, settle_s=0.8):
                     return
                 xml_text = dump_ui_xml(device)
             continue
@@ -756,11 +765,11 @@ def open_matches(
     nodes = parse_ui_nodes(xml_text)
     ctx = classify_hinge_screen(nodes, height, xml_text=xml_text)
     if ctx.is_matches_list or matches_list_visible(nodes, height):
-        time.sleep(max(0.2, float(settle_s) * 0.4))
+        time.sleep(max(0.1, min(0.2, float(settle_s) * 0.5)))
         return
 
     _tap_matches_nav(nodes)
-    time.sleep(max(0.35, float(settle_s)))
+    time.sleep(max(0.2, float(settle_s)))
 
     # If still in a thread or feed, Back (when in thread) + Matches tap again.
     xml_text = dump_ui_xml(device)
@@ -769,23 +778,35 @@ def open_matches(
     if ctx.is_matches_list or matches_list_visible(nodes, height):
         return
     if in_match_conversation(nodes):
-        press_back(device, settle_s=0.45)
+        press_back(device, settle_s=0.2, check_hinge=False)
         xml_text = dump_ui_xml(device)
         nodes = parse_ui_nodes(xml_text)
     _tap_matches_nav(nodes)
-    time.sleep(max(0.35, float(settle_s)))
+    time.sleep(max(0.2, float(settle_s)))
 
 
-def press_back(device, *, settle_s: float = 0.55) -> None:
+def press_back(
+    device,
+    *,
+    settle_s: float = 0.25,
+    check_hinge: bool = True,
+) -> None:
     # Prefer the system Back key. Tapping a "Back" content-desc outside Hinge
     # (Honor Settings / search) keeps us trapped in system UI.
     device.shell("input keyevent 4")
-    time.sleep(max(0.25, float(settle_s)))
+    time.sleep(max(0.15, float(settle_s)))
+    if not check_hinge:
+        return
+    # Cheap dumpsys first; only dump UI when we may have left Hinge.
+    from helper_functions import hinge_is_foreground
+
+    if hinge_is_foreground(device):
+        return
     xml_text = dump_ui_xml(device)
     if is_hinge_xml(xml_text):
         return
     # Still off-app: one more Back, then force Hinge open.
     device.shell("input keyevent 4")
-    time.sleep(0.45)
+    time.sleep(0.25)
     if not is_hinge_xml(dump_ui_xml(device)):
-        ensure_hinge_foreground(device)
+        ensure_hinge_foreground(device, settle_s=0.8)

@@ -108,7 +108,7 @@ def open_profile_tab(device) -> bool:
     # Right-hand tab is usually the widest / rightmost Profile label.
     candidates.sort(key=lambda n: n.bounds[0], reverse=True)
     tap_bounds(device, candidates[0].bounds)
-    time.sleep(1.0)
+    time.sleep(0.3)
     return True
 
 
@@ -123,7 +123,7 @@ def open_chat_tab(device) -> bool:
         return False
     candidates.sort(key=lambda n: n.bounds[0])
     tap_bounds(device, candidates[0].bounds)
-    time.sleep(0.7)
+    time.sleep(0.25)
     return True
 
 
@@ -377,7 +377,7 @@ def collect_profile_fields(
         int(height * 0.75),
         260,
     )
-    time.sleep(0.35)
+    time.sleep(0.2)
 
     ordered: List[ProfileField] = []
     seen: Set[str] = set()
@@ -412,19 +412,15 @@ def collect_profile_fields(
         return []
 
     for scroll_i in range(max_scrolls):
-        pre_xml = dump_ui_xml(device)
-        pre_nodes = parse_ui_nodes(pre_xml) if is_hinge_xml(pre_xml) else []
-        if not _assert_profile_context(pre_nodes, pre_xml, action="scrolling profile"):
-            break
         swipe(
             device,
             width // 2,
             int(height * 0.72),
             width // 2,
             int(height * 0.36),
-            280,
+            220,
         )
-        time.sleep(max(0.35, float(scroll_pause_s)))
+        time.sleep(max(0.15, min(0.35, float(scroll_pause_s))))
         added = ingest()
         if added is None:
             break

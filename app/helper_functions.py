@@ -257,14 +257,25 @@ def get_screen_resolution(device):
     return width, height
 
 
-def open_hinge(device, settle_s: float = 5.0):
+def hinge_is_foreground(device) -> bool:
+    """Fast package check (dumpsys) — avoids a full uiautomator dump."""
+    top = device.shell(
+        "dumpsys activity activities | grep -E 'topResumedActivity|mResumedActivity' | head -1"
+    )
+    return "co.hinge.app" in (top or "")
+
+
+def open_hinge(device, settle_s: float = 0.8, *, force: bool = False):
+    """Bring Hinge to foreground. Skips relaunch when already on top."""
     package_name = "co.hinge.app"
+    if not force and hinge_is_foreground(device):
+        return
     device.shell(f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1")
-    time.sleep(max(0.5, float(settle_s)))
+    time.sleep(max(0.25, float(settle_s)))
 
 
 def open_discover(device, width, height):
     discover_x = int(width * 0.10)
     discover_y = int(height * 0.96)
     tap(device, discover_x, discover_y)
-    time.sleep(3)
+    time.sleep(0.4)
