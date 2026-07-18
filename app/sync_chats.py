@@ -31,7 +31,14 @@ from db import (
 from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
 from profile_scraper import collect_profile_fields, profile_fields_as_dicts
 from style_learner import messages_as_dicts
-from ui_dump import ensure_hinge_foreground, open_matches, press_back, swipe
+from ui_dump import (
+    classify_device_screen,
+    ensure_hinge_foreground,
+    open_matches,
+    press_back,
+    recover_to_matches,
+    swipe,
+)
 from your_turn import (
     collect_chat_history,
     conversation_open_for_match,
@@ -73,7 +80,23 @@ def _history_belongs_to_other_match(history, match_name: str) -> bool:
     return False
 
 
-def _scroll_matches_list(device, width: int, height: int) -> None:
+def _ensure_matches_list(device, width: int, height: int, *, why: str) -> bool:
+    """Verify Matches list before list scrolls/taps; recover if lost."""
+    ctx = classify_device_screen(device, height)
+    if ctx.is_matches_list:
+        return True
+    return recover_to_matches(
+        device,
+        width,
+        height,
+        reason=f"{why} (saw {ctx.kind}: {ctx.detail})",
+    )
+
+
+def _scroll_matches_list(device, width: int, height: int) -> bool:
+    if not _ensure_matches_list(device, width, height, why="before Matches list scroll"):
+        print("  skip list scroll: could not recover Matches list")
+        return False
     swipe(
         device,
         width // 2,
@@ -83,10 +106,22 @@ def _scroll_matches_list(device, width: int, height: int) -> None:
         350,
     )
     time.sleep(0.85)
+    return True
 
 
 def _scroll_matches_to_top(device, width: int, height: int, passes: int = 3) -> None:
+    if not _ensure_matches_list(device, width, height, why="before scrolling Matches to top"):
+        return
     for _ in range(passes):
+        ctx = classify_device_screen(device, height)
+        if not ctx.is_matches_list:
+            recover_to_matches(
+                device,
+                width,
+                height,
+                reason=f"lost Matches while scrolling to top ({ctx.kind})",
+            )
+            return
         swipe(
             device,
             width // 2,
@@ -148,6 +183,12 @@ def run_sync(
     total_profile_inserted = 0
 
     while len(synced_names) < max_chats and stagnant_pages < 8:
+        if not _ensure_matches_list(
+            device, width, height, why="before listing Matches conversations"
+        ):
+            print("Aborting sync page: Matches list unavailable")
+            break
+
         conversations = list_match_conversations(
             device,
             skip_new_matches=skip_new,
@@ -201,18 +242,59 @@ def run_sync(
             if conversation.preview:
                 print(f"Preview: {conversation.preview}")
 
+            # Re-check list context immediately before tapping a row.
+            if not _ensure_matches_list(
+                device,
+                width,
+                height,
+                why=f"before opening {conversation.name}",
+            ):
+                print(f"  skip: not on Matches list before {conversation.name}")
+                continue
+
             open_conversation(device, conversation, settle_s=1.2)
             if not ensure_hinge_foreground(device, settle_s=2.0):
                 print("  skip: could not stay in Hinge after opening chat")
-                open_matches(device, width, height, settle_s=0.8)
+                recover_to_matches(
+                    device,
+                    width,
+                    height,
+                    reason="left Hinge after opening chat",
+                )
                 continue
-            if not conversation_open_for_match(device, conversation.name):
+
+            open_ctx = classify_device_screen(
+                device, height, expect_match=conversation.name
+            )
+            if open_ctx.is_feed or open_ctx.is_lost_for_match_sync:
+                print(
+                    f"  skip: landed on {open_ctx.kind} instead of "
+                    f"{conversation.name}'s chat ({open_ctx.detail})"
+                )
+                recover_to_matches(
+                    device,
+                    width,
+                    height,
+                    reason=(
+                        f"wrong screen after opening {conversation.name}: "
+                        f"{open_ctx.kind}"
+                    ),
+                )
+                continue
+
+            if not conversation_open_for_match(
+                device, conversation.name, height=height
+            ):
                 print(
                     f"  skip: open screen is not {conversation.name}'s chat "
                     "(stale row / wrong tap)"
                 )
-                press_back(device, settle_s=0.45)
-                open_matches(device, width, height, settle_s=0.8)
+                recover_to_matches(
+                    device,
+                    width,
+                    height,
+                    reason=f"wrong chat after tapping {conversation.name}",
+                )
                 continue
 
             history = collect_chat_history(
@@ -222,14 +304,34 @@ def run_sync(
                 conversation.name,
                 settle_bottom=False,
             )
+            mid_ctx = classify_device_screen(
+                device, height, expect_match=conversation.name
+            )
+            if mid_ctx.is_feed or mid_ctx.kind == "off_hinge":
+                print(
+                    f"  skip: lost context during chat scrape "
+                    f"({mid_ctx.kind}: {mid_ctx.detail})"
+                )
+                recover_to_matches(
+                    device,
+                    width,
+                    height,
+                    reason=f"lost during chat scrape for {conversation.name}",
+                )
+                continue
+
             history.is_new_match = conversation.is_new_match
             if _history_belongs_to_other_match(history, conversation.name):
                 print(
                     f"  skip: scraped messages look like another match "
                     f"(not {conversation.name})"
                 )
-                press_back(device, settle_s=0.45)
-                open_matches(device, width, height, settle_s=0.8)
+                recover_to_matches(
+                    device,
+                    width,
+                    height,
+                    reason=f"cross-thread scrape for {conversation.name}",
+                )
                 continue
 
             result = upsert_match_history(
@@ -256,6 +358,25 @@ def run_sync(
                 print("  (no messages)")
 
             if not skip_profile:
+                # Only scrape Profile when still inside this match conversation.
+                pre_profile = classify_device_screen(
+                    device, height, expect_match=conversation.name
+                )
+                if not pre_profile.is_match_conversation:
+                    print(
+                        f"  profile skipped: not in {conversation.name}'s chat "
+                        f"({pre_profile.kind}: {pre_profile.detail})"
+                    )
+                    recover_to_matches(
+                        device,
+                        width,
+                        height,
+                        reason=(
+                            f"not in conversation before profile for "
+                            f"{conversation.name}"
+                        ),
+                    )
+                    continue
                 try:
                     profile_fields = collect_profile_fields(
                         device,
@@ -263,6 +384,24 @@ def run_sync(
                         height,
                         conversation.name,
                     )
+                    post_profile = classify_device_screen(
+                        device, height, expect_match=conversation.name
+                    )
+                    if post_profile.is_feed or post_profile.kind == "off_hinge":
+                        print(
+                            f"  profile aborted: wandered to {post_profile.kind} "
+                            f"({post_profile.detail})"
+                        )
+                        recover_to_matches(
+                            device,
+                            width,
+                            height,
+                            reason=(
+                                f"lost during profile scrape for "
+                                f"{conversation.name}"
+                            ),
+                        )
+                        continue
                     if profile_fields:
                         inserted, total = upsert_profile_fields(
                             match_id,
@@ -282,13 +421,25 @@ def run_sync(
                         print("  profile fields skipped (empty / wrong screen)")
                 except Exception as exception:
                     print(f"  profile scrape failed: {exception}")
+                    recover_to_matches(
+                        device,
+                        width,
+                        height,
+                        reason=f"profile exception for {conversation.name}",
+                    )
+                    continue
 
             # Leave profile/chat and land back on Matches list.
             press_back(device, settle_s=0.5)
             time.sleep(0.35)
-            if not ensure_hinge_foreground(device, settle_s=2.0):
-                print("  recovery: forcing Hinge + Matches after chat")
-            open_matches(device, width, height, settle_s=0.8)
+            if not recover_to_matches(
+                device,
+                width,
+                height,
+                reason=f"after syncing {conversation.name}",
+                lost=False,
+            ):
+                print("  warning: could not return to Matches list")
             time.sleep(0.3)
 
         if page_new == 0:
@@ -297,7 +448,9 @@ def run_sync(
             stagnant_pages = 0
 
         if len(synced_names) < max_chats:
-            _scroll_matches_list(device, width, height)
+            if not _scroll_matches_list(device, width, height):
+                print("Stopping sync: Matches list scroll unsafe")
+                break
 
     stats = sync_stats()
     finish_run(

@@ -12,11 +12,14 @@ from ui_dump import (
     Bounds,
     MESSAGE_DESC_RE,
     bounds_center,
+    classify_hinge_screen,
     composer_draft_texts,
     dump_ui_xml,
     find_nodes,
     is_composer_draft_text,
     is_composer_node,
+    is_hinge_xml,
+    on_match_conversation_screen,
     open_matches,
     parse_ui_nodes,
     press_back,
@@ -129,15 +132,27 @@ def list_match_conversations(
     only_your_turn: bool = False,
 ) -> List[ConversationPreview]:
     """List visible Matches-tab conversations (Your Turn and/or beyond)."""
-    from ui_dump import in_match_conversation, is_hinge_xml
+    from ui_dump import in_match_conversation
 
     xml_text = dump_ui_xml(device)
     if not is_hinge_xml(xml_text):
         print("Matches list skipped: not in Hinge")
         return []
     nodes = parse_ui_nodes(xml_text)
+    # height unknown here — use a generous default for feed detection.
+    list_height = 2800
+    for node in nodes:
+        list_height = max(list_height, node.bounds[3])
+    ctx = classify_hinge_screen(nodes, list_height, xml_text=xml_text)
+    if ctx.is_feed:
+        print(f"Matches list skipped: on {ctx.kind} feed ({ctx.detail})")
+        return []
     if in_match_conversation(nodes):
         print("Matches list skipped: inside an open chat/profile")
+        return []
+    if not ctx.is_matches_list and ctx.kind != "unknown":
+        # unknown may still be a scrolled Matches page without headers.
+        print(f"Matches list skipped: screen is {ctx.kind} ({ctx.detail})")
         return []
     headers = _section_headers(nodes)
     your_turn_range = None
@@ -378,10 +393,40 @@ def collect_chat_history(
     ordered: List[ChatMessage] = []
     seen: Set[str] = set()
     stagnant = 0
+    lost_context = False
+
+    def still_in_match_chat() -> bool:
+        nonlocal lost_context
+        xml_text = dump_ui_xml(device)
+        if not is_hinge_xml(xml_text):
+            print(f"  chat scrape abort: left Hinge while reading {name}")
+            lost_context = True
+            return False
+        nodes = parse_ui_nodes(xml_text)
+        if on_match_conversation_screen(
+            nodes, height, name, xml_text=xml_text
+        ):
+            return True
+        ctx = classify_hinge_screen(
+            nodes, height, xml_text=xml_text, expect_match=name
+        )
+        print(
+            f"  chat scrape abort: lost {name}'s conversation "
+            f"({ctx.kind}: {ctx.detail})"
+        )
+        lost_context = True
+        return False
 
     def ingest_screen() -> int:
         nonlocal ordered
-        nodes = parse_ui_nodes(dump_ui_xml(device))
+        xml_text = dump_ui_xml(device)
+        if not is_hinge_xml(xml_text):
+            return 0
+        nodes = parse_ui_nodes(xml_text)
+        if not on_match_conversation_screen(
+            nodes, height, name, xml_text=xml_text
+        ):
+            return 0
         on_screen, _ = _parse_messages_from_nodes(nodes)
         new_messages = []
         for message in on_screen:
@@ -396,10 +441,15 @@ def collect_chat_history(
         ordered = new_messages + ordered
         return len(new_messages)
 
+    if not still_in_match_chat():
+        return ConversationHistory(name=name, messages=[])
+
     # Current viewport first (newer messages near bottom).
     ingest_screen()
 
     for _ in range(max_scrolls):
+        if not still_in_match_chat():
+            break
         # Finger moves down → older history appears at the top.
         swipe(
             device,
@@ -410,6 +460,8 @@ def collect_chat_history(
             280,
         )
         time.sleep(max(0.35, float(scroll_pause_s)))
+        if lost_context or not still_in_match_chat():
+            break
         added = ingest_screen()
         if added == 0:
             stagnant += 1
@@ -420,8 +472,10 @@ def collect_chat_history(
 
     # Scroll back to the latest messages so the composer is usable.
     # Sync often opens Profile next — skip this when settle_bottom=False.
-    if settle_bottom:
+    if settle_bottom and not lost_context:
         for _ in range(2):
+            if not still_in_match_chat():
+                break
             swipe(
                 device,
                 width // 2,
@@ -445,43 +499,27 @@ def open_conversation(
     time.sleep(max(0.4, float(settle_s)))
 
 
-def conversation_open_for_match(device, match_name: str) -> bool:
+def conversation_open_for_match(device, match_name: str, *, height: int = 2800) -> bool:
     """
     True when the open screen looks like this match's chat/profile
-    (header name + chat chrome), not the Matches list or another thread.
+    (header name + chat chrome), not Matches list / Discover / another thread.
     """
-    from ui_dump import is_hinge_xml
-
     xml_text = dump_ui_xml(device)
     if not is_hinge_xml(xml_text):
         return False
     nodes = parse_ui_nodes(xml_text)
-    want = (match_name or "").strip().lower()
-    if not want:
-        return False
-
-    has_composer = any(is_composer_node(node) for node in nodes)
-    has_chat_tab = any(
-        (node.text or "").strip().lower() == "chat" and node.bounds[1] < 900
-        for node in nodes
+    if on_match_conversation_screen(
+        nodes, height, match_name, xml_text=xml_text
+    ):
+        return True
+    ctx = classify_hinge_screen(
+        nodes, height, xml_text=xml_text, expect_match=match_name
     )
-    has_profile_tab = any(
-        (node.text or "").strip().lower() == "profile" and node.bounds[1] < 900
-        for node in nodes
-    )
-    if not (has_composer or (has_chat_tab and has_profile_tab)):
-        return False
-
-    # Name usually appears as header text or "Name, verified" content-desc.
-    for node in nodes:
-        text = (node.text or "").strip().lower()
-        desc = (node.content_desc or "").strip().lower()
-        if text == want or desc == want:
-            return True
-        if desc.startswith(want + ",") or desc.startswith(want + " "):
-            return True
-        if text.startswith(want + ",") or text.startswith(want + " "):
-            return True
+    if ctx.is_feed or ctx.is_matches_list or ctx.kind == "off_hinge":
+        print(
+            f"  open-check: not in {match_name}'s chat "
+            f"({ctx.kind}: {ctx.detail})"
+        )
     return False
 
 

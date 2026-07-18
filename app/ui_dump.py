@@ -24,6 +24,25 @@ COMPOSER_RESOURCE_FRAGMENTS = (
 )
 
 
+# High-level Hinge screens sync/draft automation must distinguish.
+SCREEN_OFF_HINGE = "off_hinge"
+SCREEN_MATCHES_LIST = "matches_list"
+SCREEN_MATCH_CHAT = "match_chat"
+SCREEN_MATCH_PROFILE = "match_profile"
+SCREEN_DISCOVER = "discover"
+SCREEN_STANDOUTS = "standouts"
+SCREEN_LIKES_YOU = "likes_you"
+SCREEN_UNKNOWN = "unknown"
+
+# Bottom-nav / feed labels that mean we left Matches → conversation flow.
+_FEED_NAV_LABELS = (
+    ("discover", SCREEN_DISCOVER),
+    ("explore", SCREEN_DISCOVER),
+    ("standouts", SCREEN_STANDOUTS),
+    ("likes you", SCREEN_LIKES_YOU),
+)
+
+
 @dataclass
 class UiNode:
     text: str
@@ -32,8 +51,46 @@ class UiNode:
     class_name: str
     clickable: bool
     editable: bool
+    selected: bool
     bounds: Bounds
     children_text: List[str]
+
+
+@dataclass
+class ScreenContext:
+    """Where automation believes it is inside (or outside) Hinge."""
+
+    kind: str
+    match_name: Optional[str] = None
+    detail: str = ""
+
+    @property
+    def is_matches_list(self) -> bool:
+        return self.kind == SCREEN_MATCHES_LIST
+
+    @property
+    def is_match_conversation(self) -> bool:
+        return self.kind in {SCREEN_MATCH_CHAT, SCREEN_MATCH_PROFILE}
+
+    @property
+    def is_feed(self) -> bool:
+        return self.kind in {
+            SCREEN_DISCOVER,
+            SCREEN_STANDOUTS,
+            SCREEN_LIKES_YOU,
+        }
+
+    @property
+    def is_lost_for_match_sync(self) -> bool:
+        """True when sync must abort the current match and recover."""
+        return self.kind in {
+            SCREEN_OFF_HINGE,
+            SCREEN_DISCOVER,
+            SCREEN_STANDOUTS,
+            SCREEN_LIKES_YOU,
+            SCREEN_UNKNOWN,
+            SCREEN_MATCHES_LIST,
+        }
 
 
 def parse_bounds(raw: str) -> Optional[Bounds]:
@@ -109,6 +166,7 @@ def parse_ui_nodes(xml_text: str) -> List[UiNode]:
                 class_name=(element.attrib.get("class") or "").split(".")[-1],
                 clickable=element.attrib.get("clickable") == "true",
                 editable=element.attrib.get("editable") == "true",
+                selected=element.attrib.get("selected") == "true",
                 bounds=bounds,
                 children_text=children_text,
             )
@@ -205,23 +263,412 @@ def swipe(
     device.shell(f"input swipe {x1} {y1} {x2} {y2} {duration_ms}")
 
 
+def _top_tab_nodes(nodes: List[UiNode], label: str, *, max_y: int = 900) -> List[UiNode]:
+    want = label.strip().lower()
+    return [
+        node
+        for node in nodes
+        if (node.text or "").strip().lower() == want and node.bounds[1] < max_y
+    ]
+
+
+def chat_profile_tabs_visible(nodes: List[UiNode]) -> bool:
+    """True when in-conversation Chat + Profile tabs are both visible near the top."""
+    return bool(_top_tab_nodes(nodes, "chat") and _top_tab_nodes(nodes, "profile"))
+
+
+def header_match_name_visible(nodes: List[UiNode], match_name: str) -> bool:
+    """True when the open conversation header looks like this match."""
+    want = (match_name or "").strip().lower()
+    if not want:
+        return False
+    for node in nodes:
+        # Prefer header-area nodes (above Chat/Profile tabs / composer).
+        if node.bounds[1] > 1100:
+            continue
+        text = (node.text or "").strip().lower()
+        desc = (node.content_desc or "").strip().lower()
+        if text == want or desc == want:
+            return True
+        if desc.startswith(want + ",") or desc.startswith(want + " "):
+            return True
+        if text.startswith(want + ",") or text.startswith(want + " "):
+            return True
+    return False
+
+
+def _bottom_nav_hits(nodes: List[UiNode], height: int) -> List[UiNode]:
+    floor = int(height * 0.86)
+    hits = []
+    for node in nodes:
+        if node.bounds[1] < floor:
+            continue
+        label = ((node.content_desc or node.text) or "").strip().lower()
+        if not label:
+            continue
+        if any(
+            key in label
+            for key, _ in _FEED_NAV_LABELS
+        ) or label == "matches" or "matches" in label:
+            hits.append(node)
+    return hits
+
+
+def active_bottom_nav_kind(nodes: List[UiNode], height: int) -> Optional[str]:
+    """
+    Return discover|standouts|likes_you|matches when bottom nav is readable.
+    Prefer selected=true; fall back to presence of a single dominant feed label.
+    """
+    hits = _bottom_nav_hits(nodes, height)
+    if not hits:
+        return None
+
+    def kind_for_label(label: str) -> Optional[str]:
+        lowered = label.strip().lower()
+        for key, kind in _FEED_NAV_LABELS:
+            if key in lowered:
+                return kind
+        if "matches" in lowered:
+            return SCREEN_MATCHES_LIST
+        return None
+
+    selected_kinds = []
+    for node in hits:
+        if not node.selected:
+            continue
+        kind = kind_for_label((node.content_desc or node.text) or "")
+        if kind:
+            selected_kinds.append(kind)
+    if selected_kinds:
+        # Prefer feed tabs over Matches when both claim selected (defensive).
+        for feed_kind in (
+            SCREEN_DISCOVER,
+            SCREEN_STANDOUTS,
+            SCREEN_LIKES_YOU,
+        ):
+            if feed_kind in selected_kinds:
+                return feed_kind
+        return selected_kinds[0]
+
+    present = []
+    for node in hits:
+        kind = kind_for_label((node.content_desc or node.text) or "")
+        if kind and kind not in present:
+            present.append(kind)
+    # Without selected=, only treat as feed when conversation chrome is absent
+    # (caller decides). Here just expose Matches if present alone.
+    if SCREEN_MATCHES_LIST in present and len(present) == 1:
+        return SCREEN_MATCHES_LIST
+    return None
+
+
+def _looks_like_discover_feed(nodes: List[UiNode], height: int) -> Optional[str]:
+    """
+    Detect Discover / Standouts / Likes You / Explore when Chat/Profile chrome
+    for a match conversation is missing.
+    """
+    if chat_profile_tabs_visible(nodes):
+        return None
+
+    # Explicit bottom-nav selection wins.
+    nav_kind = active_bottom_nav_kind(nodes, height)
+    if nav_kind in {
+        SCREEN_DISCOVER,
+        SCREEN_STANDOUTS,
+        SCREEN_LIKES_YOU,
+    }:
+        return nav_kind
+
+    blob_parts = []
+    for node in nodes:
+        if node.text:
+            blob_parts.append(node.text.lower())
+        if node.content_desc:
+            blob_parts.append(node.content_desc.lower())
+    blob = " | ".join(blob_parts)
+
+    for key, kind in _FEED_NAV_LABELS:
+        # Top-of-app feed titles / selected nav labels.
+        if re.search(rf"\b{re.escape(key)}\b", blob):
+            # Avoid false positives from Matches empty-state copy mentioning Discover.
+            if kind != SCREEN_DISCOVER or "your turn" not in blob:
+                # Require bottom-nav-ish placement OR no Matches list headers.
+                nav_like = any(
+                    key in ((n.content_desc or n.text) or "").lower()
+                    and n.bounds[1] > int(height * 0.86)
+                    for n in nodes
+                )
+                has_section = any(
+                    (n.text or "").strip().lower().startswith(prefix)
+                    for n in nodes
+                    for prefix in ("your turn", "their turn", "hidden")
+                )
+                if nav_like or (not has_section and "matches" not in blob[:200]):
+                    return kind
+    return None
+
+
+def _profile_content_visible(nodes: List[UiNode]) -> bool:
+    photo_re = re.compile(r"['’]s photo\s*$", re.I)
+    basic_labels = {
+        "age",
+        "gender",
+        "sexuality",
+        "height",
+        "location",
+        "job",
+        "education",
+        "school",
+        "languages spoken",
+        "ethnicity",
+        "religion",
+        "politics",
+        "relationship type",
+        "looking for",
+    }
+    for node in nodes:
+        desc = (node.content_desc or "").strip()
+        if not desc:
+            continue
+        lowered = desc.lower()
+        if lowered in basic_labels or lowered.startswith("prompt:"):
+            return True
+        if photo_re.search(desc):
+            return True
+    return False
+
+
+def _profile_tab_selected(nodes: List[UiNode]) -> bool:
+    for node in _top_tab_nodes(nodes, "profile"):
+        if node.selected:
+            return True
+        # Parent/sibling often carries selected=true around the Profile label.
+        x1, y1, x2, y2 = node.bounds
+        for other in nodes:
+            if not other.selected:
+                continue
+            ox1, oy1, ox2, oy2 = other.bounds
+            if oy1 > 900:
+                continue
+            # Overlap with the Profile tab region.
+            if ox1 <= (x1 + x2) // 2 <= ox2 and oy1 <= (y1 + y2) // 2 <= oy2:
+                return True
+            if abs(ox1 - x1) < 80 and abs(oy1 - y1) < 80:
+                return True
+    return False
+
+
+def classify_hinge_screen(
+    nodes: List[UiNode],
+    height: int,
+    *,
+    xml_text: Optional[str] = None,
+    expect_match: Optional[str] = None,
+) -> ScreenContext:
+    """
+    Classify the current UI into Matches list / match chat / match profile /
+    Discover-like feeds / unknown / off-Hinge.
+    """
+    if xml_text is not None and not is_hinge_xml(xml_text):
+        packages = ", ".join(sorted(ui_packages(xml_text))[:4]) or "unknown"
+        return ScreenContext(SCREEN_OFF_HINGE, detail=f"packages={packages}")
+
+    if chat_profile_tabs_visible(nodes):
+        if expect_match and not header_match_name_visible(nodes, expect_match):
+            return ScreenContext(
+                SCREEN_UNKNOWN,
+                detail=f"chat/profile tabs but not header for {expect_match!r}",
+            )
+        shown = (expect_match or "").strip() or None
+        has_chat_bubbles = any(
+            MESSAGE_DESC_RE.match((node.content_desc or "").strip())
+            for node in nodes
+            if not is_composer_node(node)
+        )
+        if _profile_tab_selected(nodes) or (
+            _profile_content_visible(nodes) and not has_chat_bubbles
+        ):
+            return ScreenContext(
+                SCREEN_MATCH_PROFILE,
+                match_name=shown,
+                detail="match conversation Profile tab",
+            )
+        return ScreenContext(
+            SCREEN_MATCH_CHAT,
+            match_name=shown,
+            detail="match conversation Chat tab",
+        )
+
+    feed = _looks_like_discover_feed(nodes, height)
+    if feed:
+        return ScreenContext(feed, detail="feed/nav without match chat chrome")
+
+    # Matches list markers.
+    for node in nodes:
+        text = (node.text or "").strip().lower()
+        if text.startswith("your turn") or text.startswith("their turn"):
+            return ScreenContext(SCREEN_MATCHES_LIST, detail="section header visible")
+        if text.startswith("hidden"):
+            return ScreenContext(SCREEN_MATCHES_LIST, detail="hidden section visible")
+
+    if in_match_conversation(nodes):
+        shown = (expect_match or "").strip() or None
+        if expect_match and not header_match_name_visible(nodes, expect_match):
+            return ScreenContext(
+                SCREEN_UNKNOWN,
+                detail=f"conversation chrome but not {expect_match!r}",
+            )
+        return ScreenContext(
+            SCREEN_MATCH_CHAT,
+            match_name=shown,
+            detail="composer / chat chrome",
+        )
+
+    nav_kind = active_bottom_nav_kind(nodes, height)
+    if nav_kind == SCREEN_MATCHES_LIST:
+        return ScreenContext(SCREEN_MATCHES_LIST, detail="bottom nav Matches")
+    if nav_kind in {SCREEN_DISCOVER, SCREEN_STANDOUTS, SCREEN_LIKES_YOU}:
+        return ScreenContext(nav_kind, detail="bottom nav feed tab")
+
+    return ScreenContext(SCREEN_UNKNOWN, detail="unrecognized hinge screen")
+
+
+def classify_device_screen(
+    device,
+    height: int,
+    *,
+    expect_match: Optional[str] = None,
+) -> ScreenContext:
+    xml_text = dump_ui_xml(device)
+    nodes = parse_ui_nodes(xml_text) if is_hinge_xml(xml_text) else []
+    if not is_hinge_xml(xml_text):
+        return classify_hinge_screen([], height, xml_text=xml_text)
+    return classify_hinge_screen(
+        nodes, height, xml_text=xml_text, expect_match=expect_match
+    )
+
+
+def on_match_conversation_screen(
+    nodes: List[UiNode],
+    height: int,
+    match_name: str,
+    *,
+    xml_text: Optional[str] = None,
+) -> bool:
+    """True only for this match's Chat/Profile conversation (not Discover)."""
+    ctx = classify_hinge_screen(
+        nodes, height, xml_text=xml_text, expect_match=match_name
+    )
+    return ctx.is_match_conversation and header_match_name_visible(nodes, match_name)
+
+
+def on_match_profile_screen(
+    nodes: List[UiNode],
+    height: int,
+    match_name: str,
+    *,
+    xml_text: Optional[str] = None,
+) -> bool:
+    """
+    True only on a match's Profile tab inside a conversation.
+    Discover/Standouts profile cards must return False — never scroll those.
+    """
+    ctx = classify_hinge_screen(
+        nodes, height, xml_text=xml_text, expect_match=match_name
+    )
+    if ctx.kind != SCREEN_MATCH_PROFILE:
+        # Still allow when tabs + header + profile content are present even if
+        # classifier called it match_chat (composer still visible on Profile).
+        if not chat_profile_tabs_visible(nodes):
+            return False
+        if not header_match_name_visible(nodes, match_name):
+            return False
+        if ctx.is_feed or ctx.kind in {SCREEN_OFF_HINGE, SCREEN_MATCHES_LIST}:
+            return False
+        return _profile_content_visible(nodes) or _profile_tab_selected(nodes)
+    return header_match_name_visible(nodes, match_name)
+
+
+def recover_to_matches(
+    device,
+    width: int,
+    height: int,
+    *,
+    reason: str,
+    max_backs: int = 4,
+    lost: bool = True,
+) -> bool:
+    """
+    Abort off-context scrolling: Back out, reopen Hinge if needed, open Matches.
+    Returns True when Matches list looks visible afterward.
+    """
+    if lost:
+        print(f"LOST CONTEXT: {reason}")
+        print("  recovery: leave current screen → Matches list")
+    else:
+        print(f"  returning to Matches: {reason}")
+
+    for attempt in range(max_backs):
+        ctx = classify_device_screen(device, height)
+        if ctx.is_matches_list:
+            print(f"  recovery: already on Matches list ({ctx.detail})")
+            return True
+        if ctx.kind == SCREEN_OFF_HINGE:
+            print(f"  recovery: off Hinge ({ctx.detail}); reopening")
+            if not ensure_hinge_foreground(device, settle_s=2.0):
+                print("  recovery FAILED: could not reopen Hinge")
+                return False
+            break
+        if ctx.is_feed:
+            print(f"  recovery: on {ctx.kind} feed — tapping Matches / Back")
+            break
+        if ctx.is_match_conversation:
+            print(
+                f"  recovery: Back from {ctx.kind}"
+                + (f" ({ctx.match_name})" if ctx.match_name else "")
+            )
+            press_back(device, settle_s=0.45)
+            continue
+        print(f"  recovery: Back from {ctx.kind} ({ctx.detail}) [try {attempt + 1}]")
+        press_back(device, settle_s=0.45)
+
+    if not ensure_hinge_foreground(device, settle_s=2.0):
+        print("  recovery FAILED: Hinge not foreground")
+        return False
+
+    open_matches(device, width, height, settle_s=1.0)
+    ctx = classify_device_screen(device, height)
+    if ctx.is_matches_list:
+        print(f"  recovery OK: Matches list ({ctx.detail})")
+        return True
+
+    # Last resort: force Hinge open again + Matches.
+    print(f"  recovery: still {ctx.kind}; forcing open_hinge + Matches")
+    from helper_functions import open_hinge
+
+    open_hinge(device, settle_s=2.5)
+    open_matches(device, width, height, settle_s=1.0)
+    ctx = classify_device_screen(device, height)
+    ok = ctx.is_matches_list
+    if ok:
+        print(f"  recovery OK after reopen: Matches list ({ctx.detail})")
+    else:
+        print(f"  recovery FAILED: screen is {ctx.kind} ({ctx.detail})")
+    return ok
+
+
 def in_match_conversation(nodes: List[UiNode]) -> bool:
     """True when Chat/Profile + composer chrome is showing (not Matches list)."""
     has_composer = any(is_composer_node(node) for node in nodes)
-    has_chat_tab = any(
-        (node.text or "").strip().lower() == "chat" and node.bounds[1] < 900
-        for node in nodes
-    )
-    has_profile_tab = any(
-        (node.text or "").strip().lower() == "profile" and node.bounds[1] < 900
-        for node in nodes
-    )
-    return has_composer or (has_chat_tab and has_profile_tab)
+    return has_composer or chat_profile_tabs_visible(nodes)
 
 
 def matches_list_visible(nodes: List[UiNode], height: int) -> bool:
     """Heuristic: Matches list (not an open chat/profile thread)."""
     if in_match_conversation(nodes):
+        return False
+    feed = _looks_like_discover_feed(nodes, height)
+    if feed:
         return False
     for node in nodes:
         text = (node.text or "").strip().lower()
@@ -232,7 +679,7 @@ def matches_list_visible(nodes: List[UiNode], height: int) -> bool:
         for node in find_nodes(nodes, desc_contains="Matches")
         if node.bounds[1] > int(height * 0.88)
     ]
-    # Bottom-nav Matches alone is weak; require we are not in a thread.
+    # Bottom-nav Matches alone is weak; require we are not in a thread/feed.
     return bool(nav)
 
 

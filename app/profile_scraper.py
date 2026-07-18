@@ -9,12 +9,14 @@ from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
 
 from ui_dump import (
+    classify_hinge_screen,
     composer_draft_texts,
     dump_ui_xml,
     find_nodes,
     is_composer_draft_text,
     is_composer_node,
     is_hinge_xml,
+    on_match_profile_screen,
     parse_ui_nodes,
     swipe,
     tap_bounds,
@@ -295,6 +297,7 @@ def collect_profile_fields(
     """
     Open Profile tab (if needed), scroll through the profile, return all fields.
     Caller should already be inside the match conversation.
+    Never scrolls Discover/Standouts/Explore feed cards.
     """
     xml_text = dump_ui_xml(device)
     if not is_hinge_xml(xml_text):
@@ -303,15 +306,27 @@ def collect_profile_fields(
 
     # Reuse the first dump when Profile is already active (avoids an extra dump).
     nodes = parse_ui_nodes(xml_text)
+    ctx = classify_hinge_screen(
+        nodes, height, xml_text=xml_text, expect_match=match_name or None
+    )
+    if ctx.is_feed or ctx.kind in {"matches_list", "unknown", "off_hinge"}:
+        print(
+            f"  profile scrape skipped: wrong screen before Profile "
+            f"({ctx.kind}: {ctx.detail})"
+        )
+        return []
+
     opened = False
-    if not _profile_tab_active(nodes):
+    if not on_match_profile_screen(
+        nodes, height, match_name, xml_text=xml_text
+    ) and not _profile_tab_active(nodes):
         opened = open_profile_tab(device)
         xml_text = dump_ui_xml(device)
         if not is_hinge_xml(xml_text):
             print("  profile scrape skipped: left Hinge opening Profile tab")
             return []
         nodes = parse_ui_nodes(xml_text)
-        if not _profile_tab_active(nodes):
+        if not on_match_profile_screen(nodes, height, match_name, xml_text=xml_text):
             # Retry once — sometimes the first tap hits Chat chrome.
             if opened:
                 open_profile_tab(device)
@@ -320,9 +335,38 @@ def collect_profile_fields(
                 print("  profile scrape skipped: left Hinge after Profile retry")
                 return []
             nodes = parse_ui_nodes(xml_text)
-            if not _profile_tab_active(nodes):
-                print("  profile scrape skipped: Profile tab not active")
+            if not on_match_profile_screen(
+                nodes, height, match_name, xml_text=xml_text
+            ):
+                ctx = classify_hinge_screen(
+                    nodes, height, xml_text=xml_text, expect_match=match_name or None
+                )
+                print(
+                    "  profile scrape skipped: not on match Profile tab "
+                    f"({ctx.kind}: {ctx.detail})"
+                )
                 return []
+
+    def _assert_profile_context(local_nodes, local_xml: str, *, action: str) -> bool:
+        if not is_hinge_xml(local_xml):
+            print(f"  profile scrape abort: left Hinge while {action}")
+            return False
+        if on_match_profile_screen(
+            local_nodes, height, match_name, xml_text=local_xml
+        ):
+            return True
+        ctx_now = classify_hinge_screen(
+            local_nodes, height, xml_text=local_xml, expect_match=match_name or None
+        )
+        print(
+            f"  profile scrape abort: lost match Profile while {action} "
+            f"({ctx_now.kind}: {ctx_now.detail})"
+        )
+        return False
+
+    # Guard before any profile scroll — Discover cards look similar without tabs.
+    if not _assert_profile_context(nodes, xml_text, action="starting profile scroll"):
+        return []
 
     # Single nudge toward top of profile content.
     swipe(
@@ -341,10 +385,9 @@ def collect_profile_fields(
 
     def ingest(xml_override: Optional[str] = None) -> Optional[int]:
         local_xml = xml_override if xml_override is not None else dump_ui_xml(device)
-        if not is_hinge_xml(local_xml):
-            print("  profile scrape abort: left Hinge while scrolling")
+        local_nodes = parse_ui_nodes(local_xml) if is_hinge_xml(local_xml) else []
+        if not _assert_profile_context(local_nodes, local_xml, action="ingesting"):
             return None
-        local_nodes = parse_ui_nodes(local_xml)
         # Matches-list / Settings chrome can keep producing "new" captions forever.
         if not _profile_tab_active(local_nodes) and not ordered:
             return None
@@ -365,10 +408,14 @@ def collect_profile_fields(
     # Ingest after the top nudge (one dump).
     first = ingest()
     if first is None:
-        print("  profile scrape skipped: no Profile content visible")
+        print("  profile scrape skipped: no Profile content visible / lost context")
         return []
 
     for scroll_i in range(max_scrolls):
+        pre_xml = dump_ui_xml(device)
+        pre_nodes = parse_ui_nodes(pre_xml) if is_hinge_xml(pre_xml) else []
+        if not _assert_profile_context(pre_nodes, pre_xml, action="scrolling profile"):
+            break
         swipe(
             device,
             width // 2,
