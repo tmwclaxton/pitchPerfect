@@ -1,15 +1,19 @@
 # app/sync_chats.py
 """
-Sync full Hinge Matches chat histories + profile text into SQLite.
+Sync Hinge Matches chats + profiles into SQLite (two-phase by default).
+
+Phase A (capture): walk the device, save UIAutomator XML dumps (+ optional PNGs).
+Phase B (process): parse dumps in a thread pool and upsert into SQLite.
 
 Examples:
-  python sync_chats.py
-  python sync_chats.py --max-chats 5
-  python sync_chats.py --skip-new
-  python sync_chats.py --skip-profile
-  python sync_chats.py --force                 # re-scrape even if fresh in DB
-  python sync_chats.py --fresh-hours 12
-  python migrate.py   # apply schema only
+  python sync_chats.py                      # capture then process
+  python sync_chats.py --capture-only
+  python sync_chats.py --process-only
+  python sync_chats.py --process-only --run-dir data/captures/…_run3
+  python sync_chats.py --max-chats 5 --workers 6
+  python sync_chats.py --screenshots        # also save PNGs during capture
+  python sync_chats.py --live               # old single-phase device loop
+  python migrate.py
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ import time
 
 from dotenv import load_dotenv
 
-from config import SQLITE_PATH
+from config import CAPTURE_WORKERS, SQLITE_PATH
 from db import (
     finish_run,
     match_is_fresh,
@@ -31,6 +35,8 @@ from db import (
 from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
 from profile_scraper import collect_profile_fields, profile_fields_as_dicts
 from style_learner import messages_as_dicts
+from sync_capture import DEFAULT_FRESH_HOURS, DEFAULT_MAX_CHATS, run_capture
+from sync_process import run_process
 from ui_dump import (
     classify_device_screen,
     ensure_hinge_foreground,
@@ -46,10 +52,6 @@ from your_turn import (
     open_conversation,
 )
 
-# Safety ceiling when the Matches list is huge / count unknown.
-DEFAULT_MAX_CHATS = 200
-DEFAULT_FRESH_HOURS = 24.0
-
 
 def _history_belongs_to_other_match(history, match_name: str) -> bool:
     """Detect cross-thread scrapes via 'You liked Other's photo' bubbles."""
@@ -64,12 +66,10 @@ def _history_belongs_to_other_match(history, match_name: str) -> bool:
             "chat",
             "profile",
         }:
-            # Bubble attributed to a different person's name.
             if len(sender) >= 2 and sender != want:
                 return True
         lower = text.lower()
         if "you liked " in lower and "'s " in lower:
-            # e.g. "You liked Sara's photo."
             try:
                 liked = lower.split("you liked ", 1)[1]
                 liked_name = liked.split("'s ", 1)[0].strip()
@@ -81,7 +81,6 @@ def _history_belongs_to_other_match(history, match_name: str) -> bool:
 
 
 def _ensure_matches_list(device, width: int, height: int, *, why: str) -> bool:
-    """Verify Matches list before list scrolls/taps; recover if lost."""
     ctx = classify_device_screen(device, height)
     if ctx.is_matches_list:
         return True
@@ -133,7 +132,7 @@ def _scroll_matches_to_top(device, width: int, height: int, passes: int = 3) -> 
         time.sleep(0.45)
 
 
-def run_sync(
+def run_sync_live(
     *,
     max_chats: int,
     skip_new: bool = False,
@@ -141,6 +140,7 @@ def run_sync(
     force: bool = False,
     fresh_hours: float = DEFAULT_FRESH_HOURS,
 ) -> None:
+    """Legacy single-phase sync (parse + upsert inside the device loop)."""
     load_dotenv()
     device = connect_device_auto()
     if not device:
@@ -152,7 +152,7 @@ def run_sync(
     _scroll_matches_to_top(device, width, height)
 
     run_id = start_run(
-        "sync_history",
+        "sync_history_live",
         {
             "max_chats": max_chats,
             "skip_new": skip_new,
@@ -160,20 +160,14 @@ def run_sync(
             "force": force,
             "fresh_hours": fresh_hours,
             "sqlite": SQLITE_PATH,
+            "mode": "live",
         },
     )
     print(
-        f"Syncing up to {max_chats} Matches chat(s)"
+        f"[live] Syncing up to {max_chats} Matches chat(s)"
         + (" + profiles" if not skip_profile else "")
         + f" into {SQLITE_PATH}"
     )
-    if not force:
-        print(
-            f"Skipping matches synced in the last {fresh_hours:g}h "
-            f"with messages"
-            + (" + profiles" if not skip_profile else "")
-            + " (use --force to re-scrape)"
-        )
 
     synced_names = set()
     seen_names = set()
@@ -203,7 +197,6 @@ def run_sync(
             if key in seen_names:
                 continue
             seen_names.add(key)
-            # Skip UI chrome that sometimes looks like a conversation row.
             if key in {
                 "profile",
                 "chat",
@@ -217,6 +210,10 @@ def run_sync(
                 "hidden",
                 "new",
             } or len(key) > 48:
+                continue
+            if key.startswith("hidden (") or key.startswith("your turn"):
+                continue
+            if key.startswith("their turn"):
                 continue
 
             page_new += 1
@@ -242,7 +239,6 @@ def run_sync(
             if conversation.preview:
                 print(f"Preview: {conversation.preview}")
 
-            # Re-check list context immediately before tapping a row.
             if not _ensure_matches_list(
                 device,
                 width,
@@ -256,10 +252,7 @@ def run_sync(
             if not ensure_hinge_foreground(device, settle_s=2.0):
                 print("  skip: could not stay in Hinge after opening chat")
                 recover_to_matches(
-                    device,
-                    width,
-                    height,
-                    reason="left Hinge after opening chat",
+                    device, width, height, reason="left Hinge after opening chat"
                 )
                 continue
 
@@ -349,16 +342,8 @@ def run_sync(
                 f"messages={result['message_count']} "
                 f"(+{result['inserted']} new)"
             )
-            if history.messages:
-                first = history.messages[0]
-                last = history.messages[-1]
-                print(f"  first: {first.sender}: {first.text[:80]}")
-                print(f"  last:  {last.sender}: {last.text[:80]}")
-            else:
-                print("  (no messages)")
 
             if not skip_profile:
-                # Only scrape Profile when still inside this match conversation.
                 pre_profile = classify_device_screen(
                     device, height, expect_match=conversation.name
                 )
@@ -389,8 +374,7 @@ def run_sync(
                     )
                     if post_profile.is_feed or post_profile.kind == "off_hinge":
                         print(
-                            f"  profile aborted: wandered to {post_profile.kind} "
-                            f"({post_profile.detail})"
+                            f"  profile aborted: wandered to {post_profile.kind}"
                         )
                         recover_to_matches(
                             device,
@@ -409,14 +393,6 @@ def run_sync(
                         )
                         total_profile_inserted += inserted
                         print(f"  profile fields={total} (+{inserted} new)")
-                        for field in profile_fields[:8]:
-                            label = f"{field.label}: " if field.label else ""
-                            print(
-                                f"    [{field.field_type}] {label}"
-                                f"{field.text_content[:90]}"
-                            )
-                        if len(profile_fields) > 8:
-                            print(f"    ... +{len(profile_fields) - 8} more")
                     else:
                         print("  profile fields skipped (empty / wrong screen)")
                 except Exception as exception:
@@ -429,18 +405,15 @@ def run_sync(
                     )
                     continue
 
-            # Leave profile/chat and land back on Matches list.
             press_back(device, settle_s=0.5)
             time.sleep(0.35)
-            if not recover_to_matches(
+            recover_to_matches(
                 device,
                 width,
                 height,
                 reason=f"after syncing {conversation.name}",
                 lost=False,
-            ):
-                print("  warning: could not return to Matches list")
-            time.sleep(0.3)
+            )
 
         if page_new == 0:
             stagnant_pages += 1
@@ -465,29 +438,63 @@ def run_sync(
             "db_profile_fields": stats.get("profile_fields", 0),
         },
     )
-    print("\n--- sync complete ---")
-    print(f"Chats visited this run: {len(synced_names)}")
-    print(f"Skipped (fresh in DB): {skipped_fresh}")
-    print(f"New message rows inserted: {total_msg_inserted}")
-    print(f"New profile field rows inserted: {total_profile_inserted}")
-    print(
-        f"DB totals: {stats['matches']} matches, "
-        f"{stats['messages']} messages, "
-        f"{stats.get('profile_fields', 0)} profile fields "
-        f"({stats.get('matches_with_profiles', 0)} with profiles)"
-    )
-    print(f"SQLite: {SQLITE_PATH}")
+    print("\n--- live sync complete ---")
+    print(f"Chats visited: {len(synced_names)}")
+    print(f"DB totals: {stats['matches']} matches, {stats['messages']} messages")
 
 
 def main() -> None:
+    load_dotenv()
     parser = argparse.ArgumentParser(
-        description="Sync all Hinge Matches chats + profiles into SQLite."
+        description=(
+            "Two-phase Hinge Matches sync: capture UI dumps on-device, "
+            "then process them offline in a thread pool."
+        )
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--capture-only",
+        action="store_true",
+        help="Only Phase A: walk device and save UI dumps.",
+    )
+    mode.add_argument(
+        "--process-only",
+        action="store_true",
+        help="Only Phase B: parse an existing capture run into SQLite.",
+    )
+    mode.add_argument(
+        "--live",
+        action="store_true",
+        help="Legacy single-phase sync (parse while driving the phone).",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=int,
+        default=None,
+        help="Capture run id for --process-only (default: latest).",
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Capture directory for --process-only (manifest.json).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=CAPTURE_WORKERS,
+        help=f"Thread pool size for Phase B (default {CAPTURE_WORKERS}).",
+    )
+    parser.add_argument(
+        "--screenshots",
+        action="store_true",
+        help="Also save PNG screencaps during Phase A (slower).",
     )
     parser.add_argument(
         "--max-chats",
         type=int,
         default=DEFAULT_MAX_CHATS,
-        help=f"Max conversations to sync (default {DEFAULT_MAX_CHATS}).",
+        help=f"Max conversations to capture/sync (default {DEFAULT_MAX_CHATS}).",
     )
     parser.add_argument(
         "--skip-new",
@@ -497,31 +504,56 @@ def main() -> None:
     parser.add_argument(
         "--skip-profile",
         action="store_true",
-        help="Only sync chat history (skip Profile tab).",
+        help="Skip Profile tab capture/processing.",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Re-scrape even when the match is fresh in SQLite.",
+        help="Re-capture even when the match is fresh in SQLite.",
     )
     parser.add_argument(
         "--fresh-hours",
         type=float,
         default=DEFAULT_FRESH_HOURS,
         help=(
-            "Skip matches that already have messages (+ profiles unless "
-            f"--skip-profile) synced within this many hours "
+            "Skip matches synced within this many hours "
             f"(default {DEFAULT_FRESH_HOURS:g})."
         ),
     )
     args = parser.parse_args()
-    run_sync(
+
+    if args.live:
+        run_sync_live(
+            max_chats=args.max_chats,
+            skip_new=args.skip_new,
+            skip_profile=args.skip_profile,
+            force=args.force,
+            fresh_hours=args.fresh_hours,
+        )
+        return
+
+    if args.process_only:
+        run_process(
+            run_id=args.run_id,
+            root_dir=args.run_dir,
+            workers=args.workers,
+        )
+        return
+
+    # Default: capture then process (or capture-only).
+    capture_run = run_capture(
         max_chats=args.max_chats,
         skip_new=args.skip_new,
         skip_profile=args.skip_profile,
         force=args.force,
         fresh_hours=args.fresh_hours,
+        with_screenshots=args.screenshots,
     )
+    if args.capture_only:
+        print("Capture-only done; run with --process-only to upsert SQLite.")
+        return
+
+    run_process(run_id=capture_run.id, workers=args.workers)
 
 
 if __name__ == "__main__":

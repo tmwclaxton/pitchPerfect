@@ -1,0 +1,642 @@
+# app/sync_capture.py
+"""
+Phase A: walk Hinge Matches on-device and save UI dumps (+ optional PNGs).
+
+No SQLite message/profile upserts here — only navigation guards + artifact IO.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import time
+from typing import Optional, Set
+
+from capture_store import (
+    CaptureRun,
+    create_capture_run,
+    finish_capture_run,
+    register_match_meta,
+    save_ui_dump,
+    write_manifest,
+)
+from db import match_is_fresh
+from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
+from profile_scraper import open_profile_tab
+from ui_dump import (
+    classify_device_screen,
+    classify_hinge_screen,
+    dump_ui_xml,
+    ensure_hinge_foreground,
+    on_match_conversation_screen,
+    on_match_profile_screen,
+    open_matches,
+    parse_ui_nodes,
+    press_back,
+    recover_to_matches,
+    swipe,
+)
+from your_turn import (
+    conversation_open_for_match,
+    list_match_conversations,
+    open_conversation,
+)
+
+DEFAULT_MAX_CHATS = 200
+DEFAULT_FRESH_HOURS = 24.0
+DEFAULT_CHAT_SCROLLS = 8
+DEFAULT_PROFILE_SCROLLS = 10
+
+
+def _xml_fingerprint(xml_text: str) -> str:
+    return hashlib.md5((xml_text or "").encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _maybe_screencap(device, *, enabled: bool) -> Optional[bytes]:
+    if not enabled:
+        return None
+    try:
+        return device.screencap()
+    except Exception as exception:
+        print(f"  screencap failed: {exception}")
+        return None
+
+
+def _ensure_matches_list(device, width: int, height: int, *, why: str) -> bool:
+    ctx = classify_device_screen(device, height)
+    if ctx.is_matches_list:
+        return True
+    return recover_to_matches(
+        device,
+        width,
+        height,
+        reason=f"{why} (saw {ctx.kind}: {ctx.detail})",
+    )
+
+
+def _scroll_matches_list(device, width: int, height: int) -> bool:
+    if not _ensure_matches_list(device, width, height, why="before Matches list scroll"):
+        return False
+    swipe(
+        device,
+        width // 2,
+        int(height * 0.78),
+        width // 2,
+        int(height * 0.35),
+        350,
+    )
+    time.sleep(0.55)
+    return True
+
+
+def _scroll_matches_to_top(device, width: int, height: int, passes: int = 3) -> None:
+    if not _ensure_matches_list(device, width, height, why="before scrolling Matches to top"):
+        return
+    for _ in range(passes):
+        ctx = classify_device_screen(device, height)
+        if not ctx.is_matches_list:
+            recover_to_matches(
+                device,
+                width,
+                height,
+                reason=f"lost Matches while scrolling to top ({ctx.kind})",
+            )
+            return
+        swipe(
+            device,
+            width // 2,
+            int(height * 0.32),
+            width // 2,
+            int(height * 0.88),
+            280,
+        )
+        time.sleep(0.35)
+
+
+def _capture_dump(
+    run: CaptureRun,
+    device,
+    *,
+    kind: str,
+    sequence: int,
+    match_name: Optional[str] = None,
+    with_screenshots: bool = False,
+    meta: Optional[dict] = None,
+    xml_text: Optional[str] = None,
+) -> str:
+    xml = xml_text if xml_text is not None else dump_ui_xml(device)
+    save_ui_dump(
+        run,
+        xml,
+        kind=kind,
+        sequence=sequence,
+        match_name=match_name,
+        image_bytes=_maybe_screencap(device, enabled=with_screenshots),
+        meta=meta,
+    )
+    return xml
+
+
+def _capture_chat_scrolls(
+    run: CaptureRun,
+    device,
+    width: int,
+    height: int,
+    match_name: str,
+    *,
+    max_scrolls: int,
+    with_screenshots: bool,
+) -> int:
+    """Save chat UI dumps while scrolling up. Returns frames captured."""
+    frames = 0
+    seen_fps: Set[str] = set()
+    stagnant = 0
+
+    xml = dump_ui_xml(device)
+    nodes = parse_ui_nodes(xml)
+    if not on_match_conversation_screen(nodes, height, match_name, xml_text=xml):
+        ctx = classify_hinge_screen(
+            nodes, height, xml_text=xml, expect_match=match_name
+        )
+        print(
+            f"  chat capture abort: not in {match_name}'s chat "
+            f"({ctx.kind}: {ctx.detail})"
+        )
+        return 0
+
+    _capture_dump(
+        run,
+        device,
+        kind="chat",
+        sequence=frames,
+        match_name=match_name,
+        with_screenshots=with_screenshots,
+        xml_text=xml,
+    )
+    seen_fps.add(_xml_fingerprint(xml))
+    frames += 1
+
+    for _ in range(max_scrolls):
+        pre = classify_device_screen(device, height, expect_match=match_name)
+        if not pre.is_match_conversation or pre.is_feed:
+            print(
+                f"  chat capture stop: lost context ({pre.kind}: {pre.detail})"
+            )
+            break
+        swipe(
+            device,
+            width // 2,
+            int(height * 0.32),
+            width // 2,
+            int(height * 0.78),
+            280,
+        )
+        time.sleep(0.45)
+        xml = dump_ui_xml(device)
+        nodes = parse_ui_nodes(xml)
+        if not on_match_conversation_screen(
+            nodes, height, match_name, xml_text=xml
+        ):
+            ctx = classify_hinge_screen(
+                nodes, height, xml_text=xml, expect_match=match_name
+            )
+            print(
+                f"  chat capture stop: left conversation "
+                f"({ctx.kind}: {ctx.detail})"
+            )
+            break
+        fp = _xml_fingerprint(xml)
+        _capture_dump(
+            run,
+            device,
+            kind="chat",
+            sequence=frames,
+            match_name=match_name,
+            with_screenshots=with_screenshots,
+            xml_text=xml,
+        )
+        frames += 1
+        if fp in seen_fps:
+            stagnant += 1
+            if stagnant >= 2:
+                break
+        else:
+            seen_fps.add(fp)
+            stagnant = 0
+    return frames
+
+
+def _capture_profile_scrolls(
+    run: CaptureRun,
+    device,
+    width: int,
+    height: int,
+    match_name: str,
+    *,
+    max_scrolls: int,
+    with_screenshots: bool,
+) -> int:
+    """Open Profile tab if needed and save profile UI dumps while scrolling."""
+    xml = dump_ui_xml(device)
+    nodes = parse_ui_nodes(xml)
+    ctx = classify_hinge_screen(
+        nodes, height, xml_text=xml, expect_match=match_name
+    )
+    if ctx.is_feed or ctx.kind in {"matches_list", "off_hinge", "unknown"}:
+        if not ctx.is_match_conversation:
+            print(
+                f"  profile capture skipped: wrong screen "
+                f"({ctx.kind}: {ctx.detail})"
+            )
+            return 0
+
+    if not on_match_profile_screen(nodes, height, match_name, xml_text=xml):
+        if not open_profile_tab(device):
+            print("  profile capture skipped: could not tap Profile tab")
+            return 0
+        time.sleep(0.7)
+        xml = dump_ui_xml(device)
+        nodes = parse_ui_nodes(xml)
+        if not on_match_profile_screen(
+            nodes, height, match_name, xml_text=xml
+        ) and not on_match_conversation_screen(
+            nodes, height, match_name, xml_text=xml
+        ):
+            ctx = classify_hinge_screen(
+                nodes, height, xml_text=xml, expect_match=match_name
+            )
+            print(
+                f"  profile capture skipped: not on match Profile "
+                f"({ctx.kind}: {ctx.detail})"
+            )
+            return 0
+
+    frames = 0
+    seen_fps: Set[str] = set()
+    stagnant = 0
+
+    _capture_dump(
+        run,
+        device,
+        kind="profile",
+        sequence=frames,
+        match_name=match_name,
+        with_screenshots=with_screenshots,
+        xml_text=xml,
+    )
+    seen_fps.add(_xml_fingerprint(xml))
+    frames += 1
+
+    for _ in range(max_scrolls):
+        pre_xml = dump_ui_xml(device)
+        pre_nodes = parse_ui_nodes(pre_xml)
+        pre_ctx = classify_hinge_screen(
+            pre_nodes, height, xml_text=pre_xml, expect_match=match_name
+        )
+        if pre_ctx.is_feed:
+            print("  profile capture stop: wandered onto a feed")
+            break
+        if not (
+            on_match_profile_screen(
+                pre_nodes, height, match_name, xml_text=pre_xml
+            )
+            or on_match_conversation_screen(
+                pre_nodes, height, match_name, xml_text=pre_xml
+            )
+        ):
+            print(
+                f"  profile capture stop: lost match context "
+                f"({pre_ctx.kind}: {pre_ctx.detail})"
+            )
+            break
+        swipe(
+            device,
+            width // 2,
+            int(height * 0.72),
+            width // 2,
+            int(height * 0.36),
+            280,
+        )
+        time.sleep(0.45)
+        xml = dump_ui_xml(device)
+        nodes = parse_ui_nodes(xml)
+        ctx = classify_hinge_screen(
+            nodes, height, xml_text=xml, expect_match=match_name
+        )
+        if ctx.is_feed or ctx.kind == "off_hinge":
+            print(f"  profile capture stop: {ctx.kind}")
+            break
+        if not (
+            on_match_profile_screen(nodes, height, match_name, xml_text=xml)
+            or on_match_conversation_screen(
+                nodes, height, match_name, xml_text=xml
+            )
+        ):
+            print(f"  profile capture stop: {ctx.kind} ({ctx.detail})")
+            break
+        fp = _xml_fingerprint(xml)
+        _capture_dump(
+            run,
+            device,
+            kind="profile",
+            sequence=frames,
+            match_name=match_name,
+            with_screenshots=with_screenshots,
+            xml_text=xml,
+        )
+        frames += 1
+        if fp in seen_fps:
+            stagnant += 1
+            if stagnant >= 2:
+                break
+        else:
+            seen_fps.add(fp)
+            stagnant = 0
+    return frames
+
+
+def run_capture(
+    *,
+    max_chats: int = DEFAULT_MAX_CHATS,
+    skip_new: bool = False,
+    skip_profile: bool = False,
+    force: bool = False,
+    fresh_hours: float = DEFAULT_FRESH_HOURS,
+    with_screenshots: bool = False,
+    chat_scrolls: int = DEFAULT_CHAT_SCROLLS,
+    profile_scrolls: int = DEFAULT_PROFILE_SCROLLS,
+) -> CaptureRun:
+    """Phase A entrypoint: device walk + UI dump capture."""
+    device = connect_device_auto()
+    if not device:
+        raise RuntimeError("No device connected")
+    width, height = get_screen_resolution(device)
+
+    run = create_capture_run(
+        {
+            "max_chats": max_chats,
+            "skip_new": skip_new,
+            "skip_profile": skip_profile,
+            "force": force,
+            "fresh_hours": fresh_hours,
+            "with_screenshots": with_screenshots,
+            "phase": "capture",
+        }
+    )
+    print(f"Capture run {run.id} → {run.root_dir}")
+    print(
+        f"Capturing up to {max_chats} match(es)"
+        + (" + profiles" if not skip_profile else "")
+        + (" + PNGs" if with_screenshots else " (XML only)")
+    )
+
+    open_hinge(device=device, settle_s=2.0)
+    open_matches(device, width, height, settle_s=0.8)
+    _scroll_matches_to_top(device, width, height)
+
+    # Baseline Matches list dump.
+    if _ensure_matches_list(device, width, height, why="initial Matches list dump"):
+        _capture_dump(
+            run,
+            device,
+            kind="matches_list",
+            sequence=0,
+            with_screenshots=with_screenshots,
+        )
+
+    captured_names: Set[str] = set()
+    seen_names: Set[str] = set()
+    skipped_fresh = 0
+    stagnant_pages = 0
+    list_page = 0
+
+    try:
+        while len(captured_names) < max_chats and stagnant_pages < 8:
+            if not _ensure_matches_list(
+                device, width, height, why="before listing Matches"
+            ):
+                print("Aborting capture: Matches list unavailable")
+                break
+
+            list_page += 1
+            list_xml = dump_ui_xml(device)
+            _capture_dump(
+                run,
+                device,
+                kind="matches_list",
+                sequence=list_page,
+                with_screenshots=with_screenshots,
+                xml_text=list_xml,
+            )
+
+            conversations = list_match_conversations(
+                device,
+                skip_new_matches=skip_new,
+                only_your_turn=False,
+            )
+            page_new = 0
+
+            for conversation in conversations:
+                if len(captured_names) >= max_chats:
+                    break
+                key = conversation.name.lower()
+                if key in seen_names:
+                    continue
+                seen_names.add(key)
+                if key in {
+                    "profile",
+                    "chat",
+                    "local",
+                    "matches",
+                    "hinge",
+                    "sent",
+                    "delivered",
+                    "read",
+                    "liked",
+                    "hidden",
+                    "new",
+                } or len(key) > 48:
+                    continue
+                if key.startswith("hidden (") or key.startswith("your turn"):
+                    continue
+                if key.startswith("their turn"):
+                    continue
+
+                page_new += 1
+                section = conversation.section or "unknown"
+
+                if not force and match_is_fresh(
+                    conversation.name,
+                    require_profile=not skip_profile,
+                    max_age_hours=fresh_hours,
+                ):
+                    skipped_fresh += 1
+                    print(
+                        f"\n=== skip fresh: {conversation.name} "
+                        f"[{section}] ({len(captured_names)+1}/{max_chats}) ==="
+                    )
+                    captured_names.add(key)
+                    continue
+
+                captured_names.add(key)
+                print(
+                    f"\n=== capture: {conversation.name} "
+                    f"[{section}] ({len(captured_names)}/{max_chats}) ==="
+                )
+                if conversation.preview:
+                    print(f"Preview: {conversation.preview}")
+
+                register_match_meta(
+                    run,
+                    conversation.name,
+                    section=section,
+                    preview=conversation.preview or "",
+                    is_new_match=conversation.is_new_match,
+                )
+
+                if not _ensure_matches_list(
+                    device,
+                    width,
+                    height,
+                    why=f"before opening {conversation.name}",
+                ):
+                    print(f"  skip: not on Matches before {conversation.name}")
+                    continue
+
+                open_conversation(device, conversation, settle_s=0.9)
+                if not ensure_hinge_foreground(device, settle_s=1.5):
+                    print("  skip: left Hinge after opening chat")
+                    recover_to_matches(
+                        device, width, height, reason="left Hinge after open"
+                    )
+                    continue
+
+                open_ctx = classify_device_screen(
+                    device, height, expect_match=conversation.name
+                )
+                if open_ctx.is_feed or open_ctx.is_lost_for_match_sync:
+                    print(
+                        f"  skip: landed on {open_ctx.kind} instead of "
+                        f"{conversation.name}'s chat"
+                    )
+                    recover_to_matches(
+                        device,
+                        width,
+                        height,
+                        reason=(
+                            f"wrong screen after opening {conversation.name}: "
+                            f"{open_ctx.kind}"
+                        ),
+                    )
+                    continue
+
+                if not conversation_open_for_match(
+                    device, conversation.name, height=height
+                ):
+                    print(
+                        f"  skip: not {conversation.name}'s chat "
+                        "(stale row / wrong tap)"
+                    )
+                    recover_to_matches(
+                        device,
+                        width,
+                        height,
+                        reason=f"wrong chat after tapping {conversation.name}",
+                    )
+                    continue
+
+                chat_frames = _capture_chat_scrolls(
+                    run,
+                    device,
+                    width,
+                    height,
+                    conversation.name,
+                    max_scrolls=chat_scrolls,
+                    with_screenshots=with_screenshots,
+                )
+                print(f"  chat frames={chat_frames}")
+
+                mid = classify_device_screen(
+                    device, height, expect_match=conversation.name
+                )
+                if mid.is_feed or mid.kind == "off_hinge":
+                    print(f"  abort match: lost context ({mid.kind})")
+                    recover_to_matches(
+                        device,
+                        width,
+                        height,
+                        reason=f"lost during chat capture for {conversation.name}",
+                    )
+                    continue
+
+                if not skip_profile:
+                    profile_frames = _capture_profile_scrolls(
+                        run,
+                        device,
+                        width,
+                        height,
+                        conversation.name,
+                        max_scrolls=profile_scrolls,
+                        with_screenshots=with_screenshots,
+                    )
+                    print(f"  profile frames={profile_frames}")
+                    post = classify_device_screen(
+                        device, height, expect_match=conversation.name
+                    )
+                    if post.is_feed or post.kind == "off_hinge":
+                        print(f"  abort after profile: {post.kind}")
+                        recover_to_matches(
+                            device,
+                            width,
+                            height,
+                            reason=(
+                                f"lost during profile capture for "
+                                f"{conversation.name}"
+                            ),
+                        )
+                        continue
+
+                press_back(device, settle_s=0.4)
+                time.sleep(0.25)
+                recover_to_matches(
+                    device,
+                    width,
+                    height,
+                    reason=f"after capturing {conversation.name}",
+                    lost=False,
+                )
+                write_manifest(run)
+
+            if page_new == 0:
+                stagnant_pages += 1
+            else:
+                stagnant_pages = 0
+
+            if len(captured_names) < max_chats:
+                if not _scroll_matches_list(device, width, height):
+                    print("Stopping capture: Matches list scroll unsafe")
+                    break
+
+        finish_capture_run(
+            run,
+            status="captured",
+            meta_update={
+                "matches_visited": len(captured_names),
+                "skipped_fresh": skipped_fresh,
+                "assets": len(run.assets),
+            },
+        )
+    except Exception as exception:
+        finish_capture_run(
+            run,
+            status="failed",
+            meta_update={"error": str(exception)},
+        )
+        raise
+
+    print("\n--- capture complete ---")
+    print(f"Run: {run.id}")
+    print(f"Dir: {run.root_dir}")
+    print(f"Matches visited: {len(captured_names)}")
+    print(f"Skipped fresh: {skipped_fresh}")
+    print(f"Assets saved: {len(run.assets)}")
+    return run

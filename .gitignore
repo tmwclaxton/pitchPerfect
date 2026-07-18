@@ -9,6 +9,7 @@ app/feedback_records.json
 app/images/
 app/window_dump*.xml
 app/data/
+app/data/captures/
 __pycache__/
 *.pyc
 .venv/

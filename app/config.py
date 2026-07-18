@@ -25,6 +25,12 @@ SQLITE_PATH = os.getenv(
     "SQLITE_PATH",
     os.path.join(os.path.dirname(__file__), "data", "pitchperfect.db"),
 )
+# UI dump / screenshot capture batches (gitignored under app/data/).
+CAPTURES_DIR = os.getenv(
+    "CAPTURES_DIR",
+    os.path.join(os.path.dirname(__file__), "data", "captures"),
+)
+CAPTURE_WORKERS = int(os.getenv("CAPTURE_WORKERS", "4"))
 # ADB server host (not the phone). Use host.docker.internal from containers.
 ADB_SERVER_HOST = os.getenv("ADB_SERVER_HOST", "127.0.0.1")
 # Optional phone LAN IP for wireless adb (tcpip 5555). Empty = use USB/listed devices.

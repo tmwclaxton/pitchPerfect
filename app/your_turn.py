@@ -214,6 +214,9 @@ def list_match_conversations(
         }
         if not name or name.lower() in skip_names:
             continue
+        # Section headers sometimes appear as clickable rows.
+        if re.match(r"^(your turn|their turn|hidden)\b", name, re.I):
+            continue
         # Real match names are short; reject UI crumbs / drafts / "GT" spam.
         if len(name) < 2 or len(name) > 48:
             continue
