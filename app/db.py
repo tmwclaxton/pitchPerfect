@@ -547,8 +547,24 @@ def store_draft_reply(
     conversation_id: Optional[int] = None,
     run_id: Optional[int] = None,
 ) -> None:
+    """
+    Persist a drafted reply.
+
+    `conversation_id` from callers is historically a match_id (store_conversation
+    return value). The draft_replies.conversation_id column still FKs the legacy
+    conversations table — never write match ids there.
+    """
     match = get_match_by_name(match_name)
-    match_id = int(match["id"]) if match else conversation_id
+    match_id = int(match["id"]) if match else None
+    if match_id is None and conversation_id is not None:
+        # Caller passed match_id via the legacy conversation_id kwarg.
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM matches WHERE id = ?",
+                (int(conversation_id),),
+            ).fetchone()
+        if row:
+            match_id = int(row["id"])
     with connect() as conn:
         conn.execute(
             """
@@ -562,7 +578,7 @@ def store_draft_reply(
                 draft_id,
                 match_name,
                 match_id,
-                conversation_id,
+                None,  # legacy conversations FK — unused
                 transcript,
                 draft_reply,
                 1 if pasted else 0,
