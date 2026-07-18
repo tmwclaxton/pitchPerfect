@@ -1,26 +1,39 @@
 # app/db.py
-"""SQLite persistence for drafts, chat histories, style profile, and runs."""
+"""SQLite persistence for matches, messages, drafts, style, and runs."""
 
 from __future__ import annotations
 
+import hashlib
 import json
-import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from config import SQLITE_PATH
+from migrate import apply_migrations, ensure_parent_dir
 
 
 def _utc_now() -> str:
     return datetime.utcnow().isoformat()
 
 
-def ensure_parent_dir(path: str) -> None:
-    parent = os.path.dirname(os.path.abspath(path))
-    if parent:
-        os.makedirs(parent, exist_ok=True)
+def message_content_hash(
+    sender: str,
+    body: str,
+    timestamp_label: Optional[str] = None,
+) -> str:
+    """Stable idempotency key for a chat bubble."""
+    norm_body = re.sub(r"\s+", " ", (body or "").strip()).lower()
+    norm_sender = (sender or "").strip().lower()
+    stamp = (timestamp_label or "").strip().lower()
+    payload = f"{norm_sender}|{norm_body}|{stamp}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:40]
+
+
+def name_key(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
 
 
 @contextmanager
@@ -30,7 +43,7 @@ def connect(db_path: Optional[str] = None) -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     try:
-        init_schema(conn)
+        apply_migrations(conn)
         yield conn
         conn.commit()
     except Exception:
@@ -38,63 +51,6 @@ def connect(db_path: Optional[str] = None) -> Iterator[sqlite3.Connection]:
         raise
     finally:
         conn.close()
-
-
-def init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            kind TEXT NOT NULL,
-            started_at TEXT NOT NULL,
-            finished_at TEXT,
-            meta_json TEXT NOT NULL DEFAULT '{}'
-        );
-
-        CREATE TABLE IF NOT EXISTS conversations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            match_name TEXT NOT NULL,
-            source TEXT NOT NULL DEFAULT 'your_turn',
-            is_new_match INTEGER NOT NULL DEFAULT 0,
-            transcript TEXT NOT NULL,
-            messages_json TEXT NOT NULL DEFAULT '[]',
-            message_count INTEGER NOT NULL DEFAULT 0,
-            collected_at TEXT NOT NULL,
-            run_id INTEGER,
-            FOREIGN KEY(run_id) REFERENCES runs(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS draft_replies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            draft_id TEXT NOT NULL UNIQUE,
-            match_name TEXT NOT NULL,
-            conversation_id INTEGER,
-            transcript TEXT NOT NULL,
-            draft_reply TEXT NOT NULL,
-            pasted INTEGER NOT NULL DEFAULT 0,
-            is_new_match INTEGER NOT NULL DEFAULT 0,
-            score_json TEXT,
-            candidates_json TEXT,
-            created_at TEXT NOT NULL,
-            run_id INTEGER,
-            FOREIGN KEY(conversation_id) REFERENCES conversations(id),
-            FOREIGN KEY(run_id) REFERENCES runs(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS style_profile (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            profile_json TEXT NOT NULL,
-            sample_count INTEGER NOT NULL DEFAULT 0,
-            conversations_used INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_conversations_name
-            ON conversations(match_name);
-        CREATE INDEX IF NOT EXISTS idx_drafts_name
-            ON draft_replies(match_name);
-        """
-    )
 
 
 def start_run(kind: str, meta: Optional[Dict[str, Any]] = None) -> int:
@@ -120,6 +76,266 @@ def finish_run(run_id: int, meta: Optional[Dict[str, Any]] = None) -> None:
             )
 
 
+def upsert_match(
+    match_name: str,
+    *,
+    section: Optional[str] = None,
+    is_new_match: bool = False,
+    list_preview: Optional[str] = None,
+    hinge_id: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> int:
+    """Insert or update a match row; returns match id."""
+    key = name_key(match_name)
+    now = _utc_now()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, meta_json FROM matches WHERE name_key = ?", (key,)
+        ).fetchone()
+        if row:
+            match_id = int(row["id"])
+            merged_meta = {}
+            try:
+                merged_meta = json.loads(row["meta_json"] or "{}")
+            except json.JSONDecodeError:
+                merged_meta = {}
+            if meta:
+                merged_meta.update(meta)
+            conn.execute(
+                """
+                UPDATE matches SET
+                    name = ?,
+                    hinge_id = COALESCE(?, hinge_id),
+                    section = COALESCE(?, section),
+                    is_new_match = ?,
+                    list_preview = COALESCE(?, list_preview),
+                    meta_json = ?
+                WHERE id = ?
+                """,
+                (
+                    match_name.strip(),
+                    hinge_id,
+                    section,
+                    1 if is_new_match else 0,
+                    list_preview,
+                    json.dumps(merged_meta),
+                    match_id,
+                ),
+            )
+            return match_id
+
+        cur = conn.execute(
+            """
+            INSERT INTO matches (
+                name, name_key, hinge_id, section, is_new_match, list_preview,
+                message_count, first_seen_at, last_synced_at, meta_json
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)
+            """,
+            (
+                match_name.strip(),
+                key,
+                hinge_id,
+                section,
+                1 if is_new_match else 0,
+                list_preview,
+                now,
+                json.dumps(meta or {}),
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def upsert_match_messages(
+    match_id: int,
+    messages: Sequence[Dict[str, Any]],
+    *,
+    scraped_at: Optional[str] = None,
+) -> Tuple[int, int]:
+    """
+    Upsert messages for a match (idempotent via content_hash).
+    Returns (inserted_count, total_count).
+    """
+    return _upsert_match_messages_impl(
+        match_id, messages, scraped_at or _utc_now()
+    )
+
+
+def _upsert_match_messages_impl(
+    match_id: int,
+    messages: Sequence[Dict[str, Any]],
+    scraped_at: str,
+) -> Tuple[int, int]:
+    inserted = 0
+    with connect() as conn:
+        for index, message in enumerate(messages):
+            sender = str(message.get("sender") or "").strip() or "Unknown"
+            body = str(message.get("text") or message.get("body") or "").strip()
+            if not body:
+                continue
+            stamp = message.get("timestamp") or message.get("timestamp_label")
+            stamp_s = str(stamp).strip() if stamp else None
+            content_hash = message_content_hash(sender, body, stamp_s)
+            exists = conn.execute(
+                """
+                SELECT id FROM messages
+                WHERE match_id = ? AND content_hash = ?
+                """,
+                (match_id, content_hash),
+            ).fetchone()
+            raw = message.get("raw")
+            raw_json = json.dumps(raw) if raw is not None else None
+            if exists:
+                conn.execute(
+                    """
+                    UPDATE messages SET
+                        position = ?,
+                        timestamp_label = COALESCE(?, timestamp_label),
+                        scraped_at = ?,
+                        raw_json = COALESCE(?, raw_json)
+                    WHERE id = ?
+                    """,
+                    (index, stamp_s, scraped_at, raw_json, int(exists["id"])),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO messages (
+                        match_id, sender, body, timestamp_label, position,
+                        content_hash, scraped_at, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        match_id,
+                        sender,
+                        body,
+                        stamp_s,
+                        index,
+                        content_hash,
+                        scraped_at,
+                        raw_json,
+                    ),
+                )
+                inserted += 1
+
+        total = conn.execute(
+            "SELECT COUNT(*) AS c FROM messages WHERE match_id = ?",
+            (match_id,),
+        ).fetchone()["c"]
+        conn.execute(
+            """
+            UPDATE matches SET
+                message_count = ?,
+                last_synced_at = ?
+            WHERE id = ?
+            """,
+            (total, scraped_at, match_id),
+        )
+    return inserted, int(total)
+
+
+def upsert_match_history(
+    match_name: str,
+    messages: Sequence[Dict[str, Any]],
+    *,
+    section: Optional[str] = None,
+    is_new_match: bool = False,
+    list_preview: Optional[str] = None,
+    hinge_id: Optional[str] = None,
+    run_id: Optional[int] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Upsert match + messages. Returns ids and insert stats."""
+    extra = dict(meta or {})
+    if run_id is not None:
+        extra["last_run_id"] = run_id
+    match_id = upsert_match(
+        match_name,
+        section=section,
+        is_new_match=is_new_match,
+        list_preview=list_preview,
+        hinge_id=hinge_id,
+        meta=extra,
+    )
+    inserted, total = _upsert_match_messages_impl(
+        match_id, list(messages), _utc_now()
+    )
+    return {
+        "match_id": match_id,
+        "inserted": inserted,
+        "message_count": total,
+    }
+
+
+def get_match_by_name(match_name: str) -> Optional[Dict[str, Any]]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM matches WHERE name_key = ?",
+            (name_key(match_name),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_matches(limit: int = 500) -> List[Dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, name, section, is_new_match, message_count,
+                   last_synced_at, list_preview
+            FROM matches
+            ORDER BY (last_synced_at IS NULL), last_synced_at DESC, name COLLATE NOCASE
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_match_messages(match_id: int) -> List[Dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT sender, body, timestamp_label, position, content_hash, scraped_at
+            FROM messages
+            WHERE match_id = ?
+            ORDER BY position ASC, id ASC
+            """,
+            (match_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def match_transcript(match_id: int) -> str:
+    messages = load_match_messages(match_id)
+    if not messages:
+        return "(No messages yet - this is a new match.)"
+    lines = []
+    for message in messages:
+        stamp = (
+            f" [{message['timestamp_label']}]"
+            if message.get("timestamp_label")
+            else ""
+        )
+        lines.append(f"{message['sender']}{stamp}: {message['body']}")
+    return "\n".join(lines)
+
+
+def sync_stats() -> Dict[str, int]:
+    with connect() as conn:
+        matches = conn.execute("SELECT COUNT(*) AS c FROM matches").fetchone()["c"]
+        messages = conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"]
+        with_msgs = conn.execute(
+            "SELECT COUNT(*) AS c FROM matches WHERE message_count > 0"
+        ).fetchone()["c"]
+    return {
+        "matches": int(matches),
+        "messages": int(messages),
+        "matches_with_messages": int(with_msgs),
+    }
+
+
+# --- backward-compatible helpers used by draft_replies / style init ---
+
+
 def store_conversation(
     match_name: str,
     transcript: str,
@@ -129,27 +345,16 @@ def store_conversation(
     is_new_match: bool = False,
     run_id: Optional[int] = None,
 ) -> int:
-    messages = messages or []
-    with connect() as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO conversations (
-                match_name, source, is_new_match, transcript,
-                messages_json, message_count, collected_at, run_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                match_name,
-                source,
-                1 if is_new_match else 0,
-                transcript,
-                json.dumps(messages),
-                len(messages),
-                _utc_now(),
-                run_id,
-            ),
-        )
-        return int(cur.lastrowid)
+    """Upsert into matches/messages; returns match_id."""
+    result = upsert_match_history(
+        match_name,
+        messages or [],
+        section=source,
+        is_new_match=is_new_match,
+        run_id=run_id,
+        meta={"transcript_snapshot": transcript[:2000] if transcript else ""},
+    )
+    return int(result["match_id"])
 
 
 def store_draft_reply(
@@ -165,17 +370,21 @@ def store_draft_reply(
     conversation_id: Optional[int] = None,
     run_id: Optional[int] = None,
 ) -> None:
+    match = get_match_by_name(match_name)
+    match_id = int(match["id"]) if match else conversation_id
     with connect() as conn:
         conn.execute(
             """
             INSERT INTO draft_replies (
-                draft_id, match_name, conversation_id, transcript, draft_reply,
-                pasted, is_new_match, score_json, candidates_json, created_at, run_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                draft_id, match_name, match_id, conversation_id, transcript,
+                draft_reply, pasted, is_new_match, score_json, candidates_json,
+                created_at, run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 draft_id,
                 match_name,
+                match_id,
                 conversation_id,
                 transcript,
                 draft_reply,
@@ -237,6 +446,23 @@ def list_recent_drafts(limit: int = 20) -> List[Dict[str, Any]]:
             SELECT draft_id, match_name, draft_reply, pasted, created_at
             FROM draft_replies
             ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_all_you_messages(limit: int = 5000) -> List[Dict[str, Any]]:
+    """Messages sent by the user, for style learning from the DB."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT m.sender, m.body, m.timestamp_label, mt.name AS match_name
+            FROM messages m
+            JOIN matches mt ON mt.id = m.match_id
+            WHERE lower(m.sender) = 'you'
+            ORDER BY m.id ASC
             LIMIT ?
             """,
             (limit,),

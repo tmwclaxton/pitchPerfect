@@ -2,14 +2,14 @@
 #
 # Preferred on macOS/USB: run on the host against adb.
 #   export PATH="/opt/homebrew/bin:$PATH"
-#   cd app && ../.venv/bin/python draft_replies.py --init-style
+#   cd app && ../.venv/bin/python sync_chats.py
 #   cd app && ../.venv/bin/python draft_replies.py --all
 #
 # Docker (wireless adb recommended):
 #   1) On host: adb tcpip 5555 && adb connect PHONE_IP:5555
 #   2) Set DEVICE_IP=PHONE_IP in .env (container reaches host via host.docker.internal
 #      only if you proxy; for direct LAN use the phone IP and network_mode/host notes).
-#   3) docker compose run --rm pitchperfect python draft_replies.py --init-style
+#   3) docker compose run --rm pitchperfect python sync_chats.py
 #
 # SQLite persists in the named volume `pitchperfect-data` at /data/pitchperfect.db
 

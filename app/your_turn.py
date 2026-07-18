@@ -28,6 +28,7 @@ class ConversationPreview:
     preview: str
     bounds: Bounds
     is_new_match: bool = False
+    section: str = "unknown"  # your_turn | their_turn | hidden | unknown
 
 
 @dataclass
@@ -91,6 +92,33 @@ def _section_y_range(
     return start_y, end_y
 
 
+def _section_headers(nodes) -> List[Tuple[int, str]]:
+    """Return [(y, section_key), ...] for Matches list headers on screen."""
+    headers: List[Tuple[int, str]] = []
+    for node in nodes:
+        text = (node.text or "").strip().lower()
+        if not text:
+            continue
+        if text.startswith("your turn"):
+            headers.append((node.bounds[1], "your_turn"))
+        elif text.startswith("their turn"):
+            headers.append((node.bounds[1], "their_turn"))
+        elif text.startswith("hidden"):
+            headers.append((node.bounds[1], "hidden"))
+    headers.sort(key=lambda item: item[0])
+    return headers
+
+
+def _section_for_row(headers: List[Tuple[int, str]], row_y: int) -> str:
+    section = "unknown"
+    for header_y, key in headers:
+        if row_y >= header_y:
+            section = key
+        else:
+            break
+    return section
+
+
 def list_match_conversations(
     device,
     *,
@@ -99,6 +127,7 @@ def list_match_conversations(
 ) -> List[ConversationPreview]:
     """List visible Matches-tab conversations (Your Turn and/or beyond)."""
     nodes = parse_ui_nodes(dump_ui_xml(device))
+    headers = _section_headers(nodes)
     your_turn_range = None
     if only_your_turn:
         your_turn_range = _section_y_range(
@@ -132,22 +161,27 @@ def list_match_conversations(
             continue
 
         row_y = node.bounds[1]
+        section = _section_for_row(headers, row_y)
         if only_your_turn:
             if your_turn_range is None:
                 # Header scrolled off — keep rows that still look like Your Turn.
                 if "reply?" not in joined and "start the chat" not in joined:
                     continue
+                section = "your_turn"
             else:
                 start_y, end_y = your_turn_range
                 if row_y < start_y:
                     continue
                 if end_y is not None and row_y >= end_y:
                     continue
+                section = "your_turn"
 
         preview = texts[1].strip() if len(texts) > 1 else ""
         is_new = any("start the chat" in t.lower() for t in texts) or any(
             t.lower() == "start chat" for t in texts
         )
+        if is_new and section == "unknown":
+            section = "your_turn"
         if skip_new_matches and is_new:
             continue
         conversations.append(
@@ -156,6 +190,7 @@ def list_match_conversations(
                 preview=preview,
                 bounds=node.bounds,
                 is_new_match=is_new,
+                section=section,
             )
         )
 

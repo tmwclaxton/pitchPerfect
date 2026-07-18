@@ -3,6 +3,8 @@
 Draft replies for Hinge Your Turn, and learn texting style from Matches.
 
 Examples:
+  python sync_chats.py                     # full Matches history -> SQLite
+  python draft_replies.py --sync-history   # alias for sync_chats
   python draft_replies.py --init-style
   python draft_replies.py --max-chats 2
   python draft_replies.py --all
@@ -278,6 +280,11 @@ def main() -> None:
         description="Draft Hinge Your Turn replies / learn texting style."
     )
     parser.add_argument(
+        "--sync-history",
+        action="store_true",
+        help="Sync all Matches chat histories into SQLite (see sync_chats.py).",
+    )
+    parser.add_argument(
         "--init-style",
         action="store_true",
         help="Collect Matches chat histories and learn your texting style.",
@@ -305,6 +312,15 @@ def main() -> None:
         help="Only save drafts to SQLite.",
     )
     args = parser.parse_args()
+
+    if args.sync_history:
+        from sync_chats import DEFAULT_MAX_CHATS, run_sync
+
+        run_sync(
+            max_chats=args.max_chats or DEFAULT_MAX_CHATS,
+            skip_new=False,
+        )
+        return
 
     if args.init_style:
         max_chats = args.max_chats or STYLE_INIT_MAX_CHATS
