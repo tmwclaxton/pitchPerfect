@@ -129,13 +129,16 @@ def list_match_conversations(
     only_your_turn: bool = False,
 ) -> List[ConversationPreview]:
     """List visible Matches-tab conversations (Your Turn and/or beyond)."""
-    from ui_dump import is_hinge_xml
+    from ui_dump import in_match_conversation, is_hinge_xml
 
     xml_text = dump_ui_xml(device)
     if not is_hinge_xml(xml_text):
         print("Matches list skipped: not in Hinge")
         return []
     nodes = parse_ui_nodes(xml_text)
+    if in_match_conversation(nodes):
+        print("Matches list skipped: inside an open chat/profile")
+        return []
     headers = _section_headers(nodes)
     your_turn_range = None
     if only_your_turn:

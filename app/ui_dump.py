@@ -205,6 +205,37 @@ def swipe(
     device.shell(f"input swipe {x1} {y1} {x2} {y2} {duration_ms}")
 
 
+def in_match_conversation(nodes: List[UiNode]) -> bool:
+    """True when Chat/Profile + composer chrome is showing (not Matches list)."""
+    has_composer = any(is_composer_node(node) for node in nodes)
+    has_chat_tab = any(
+        (node.text or "").strip().lower() == "chat" and node.bounds[1] < 900
+        for node in nodes
+    )
+    has_profile_tab = any(
+        (node.text or "").strip().lower() == "profile" and node.bounds[1] < 900
+        for node in nodes
+    )
+    return has_composer or (has_chat_tab and has_profile_tab)
+
+
+def matches_list_visible(nodes: List[UiNode], height: int) -> bool:
+    """Heuristic: Matches list (not an open chat/profile thread)."""
+    if in_match_conversation(nodes):
+        return False
+    for node in nodes:
+        text = (node.text or "").strip().lower()
+        if text.startswith("your turn") or text.startswith("their turn"):
+            return True
+    nav = [
+        node
+        for node in find_nodes(nodes, desc_contains="Matches")
+        if node.bounds[1] > int(height * 0.88)
+    ]
+    # Bottom-nav Matches alone is weak; require we are not in a thread.
+    return bool(nav)
+
+
 def open_matches(
     device,
     width: int,
@@ -220,7 +251,28 @@ def open_matches(
             if not ensure_hinge_foreground(device):
                 return
             xml_text = dump_ui_xml(device)
+
+    # Leave any open chat/profile before tapping Matches — otherwise we stay
+    # in-thread and the Matches list never appears.
+    for _ in range(3):
+        nodes = parse_ui_nodes(xml_text)
+        if matches_list_visible(nodes, height):
+            break
+        if in_match_conversation(nodes):
+            press_back(device, settle_s=0.45)
+            xml_text = dump_ui_xml(device)
+            if not is_hinge_xml(xml_text):
+                if not ensure_hinge_foreground(device):
+                    return
+                xml_text = dump_ui_xml(device)
+            continue
+        break
+
     nodes = parse_ui_nodes(xml_text)
+    if matches_list_visible(nodes, height):
+        time.sleep(max(0.2, float(settle_s) * 0.4))
+        return
+
     matches = find_nodes(nodes, desc_contains="Matches")
     # Prefer bottom-nav Matches over any in-content control with similar desc.
     nav_matches = [node for node in matches if node.bounds[1] > int(height * 0.88)]
@@ -239,6 +291,22 @@ def open_matches(
             ),
         )
     time.sleep(max(0.35, float(settle_s)))
+
+    # If still in a thread, one more Back + Matches tap.
+    xml_text = dump_ui_xml(device)
+    nodes = parse_ui_nodes(xml_text)
+    if in_match_conversation(nodes):
+        press_back(device, settle_s=0.45)
+        xml_text = dump_ui_xml(device)
+        nodes = parse_ui_nodes(xml_text)
+        nav_matches = [
+            node
+            for node in find_nodes(nodes, desc_contains="Matches")
+            if node.bounds[1] > int(height * 0.88)
+        ]
+        if nav_matches:
+            tap_bounds(device, nav_matches[0].bounds)
+            time.sleep(max(0.35, float(settle_s)))
 
 
 def press_back(device, *, settle_s: float = 0.55) -> None:
