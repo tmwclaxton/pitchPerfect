@@ -145,28 +145,50 @@ def _expand_matches_sections(device, height: int) -> bool:
     return tapped
 
 
-def _scroll_matches_to_top(device, width: int, height: int, passes: int = 3) -> None:
+def _scroll_matches_to_top(device, width: int, height: int, passes: int = 14) -> None:
+    """
+    Fling Matches upward enough to escape deep Hidden lists.
+    3 passes is not enough after walking 70+ rows.
+    """
     if not _ensure_matches_list(device, width, height, why="before scrolling Matches to top"):
         return
+    stagnant = 0
+    prev_fp: Optional[str] = None
     for _ in range(passes):
-        ctx = classify_device_screen(device, height)
+        xml_text = dump_ui_xml(device)
+        ctx = classify_device_screen(device, height, xml_text=xml_text)
         if not ctx.is_matches_list:
             recover_to_matches(
                 device,
                 width,
                 height,
                 reason=f"lost Matches while scrolling to top ({ctx.kind})",
+                xml_text=xml_text,
             )
             return
+        fp = _xml_fingerprint(xml_text)
+        # Stop early once "Your turn" is visible near the top.
+        nodes = parse_ui_nodes(xml_text)
+        for node in nodes:
+            text = (node.text or "").strip().lower()
+            if text.startswith("your turn") and node.bounds[1] < int(height * 0.45):
+                return
+        if prev_fp is not None and fp == prev_fp:
+            stagnant += 1
+            if stagnant >= 2:
+                return
+        else:
+            stagnant = 0
+        prev_fp = fp
         swipe(
             device,
             width // 2,
-            int(height * 0.32),
+            int(height * 0.34),
             width // 2,
-            int(height * 0.88),
-            220,
+            int(height * 0.78),
+            260,
         )
-        time.sleep(0.2)
+        time.sleep(0.25)
 
 
 def _capture_dump(
