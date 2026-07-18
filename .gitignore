@@ -1,3 +1,14 @@
 *.env
 *.jpeg
 *.png
+.cursor/
+app/draft_replies.json
+app/profile_scores.json
+app/generated_comments.json
+app/feedback_records.json
+app/images/
+app/window_dump*.xml
+app/data/
+__pycache__/
+*.pyc
+.venv/

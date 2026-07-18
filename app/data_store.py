@@ -1,12 +1,20 @@
 # app/data_store.py
+"""Legacy JSON helpers + thin wrappers over SQLite for new features."""
+
+from __future__ import annotations
 
 import json
 import os
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import db
 
 DATA_FILE = "generated_comments.json"
 FEEDBACK_FILE = "feedback_records.json"
 PROFILE_SCORES_FILE = "profile_scores.json"
+# Kept for backward-compatible reads; new drafts go to SQLite.
+DRAFT_REPLIES_FILE = "draft_replies.json"
 
 
 def store_generated_comment(
@@ -64,6 +72,33 @@ def store_profile_scores(comment_id, profile_text, scores, decision, image_paths
         json.dump(data, f, indent=2)
 
 
+def store_draft_reply(
+    draft_id,
+    match_name,
+    transcript,
+    draft_reply,
+    pasted=False,
+    is_new_match=False,
+    score=None,
+    candidates=None,
+    conversation_id=None,
+    run_id=None,
+):
+    """Persist a drafted Your Turn reply (SQLite)."""
+    db.store_draft_reply(
+        draft_id=draft_id,
+        match_name=match_name,
+        transcript=transcript,
+        draft_reply=draft_reply,
+        pasted=pasted,
+        is_new_match=is_new_match,
+        score=score,
+        candidates=candidates,
+        conversation_id=conversation_id,
+        run_id=run_id,
+    )
+
+
 def store_feedback(comment_id, outcome: str):
     """
     Store whether the user responded positively ("match") or negatively.
@@ -99,14 +134,12 @@ def calculate_template_success_rates():
     with open(FEEDBACK_FILE, "r") as f:
         feedback_data = json.load(f)
 
-    # comment_id -> style
     comment_style_map = {}
     for c in comments_data:
         cid = c["comment_id"]
         style = c["style_used"]
         comment_style_map[cid] = style
 
-    # Tally outcomes: style -> {matches, total}
     results = {}
     for fb in feedback_data:
         cid = fb["comment_id"]
@@ -121,7 +154,6 @@ def calculate_template_success_rates():
         if outcome == "match":
             results[style]["matches"] += 1
 
-    # Convert to success rates
     success_rates = {}
     for style, counts in results.items():
         if counts["total"] > 0:
