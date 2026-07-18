@@ -222,20 +222,52 @@ def extract_profile_fields_from_nodes(
     return fields
 
 
+def _profile_tab_active(nodes) -> bool:
+    """Heuristic: Profile content visible (basics label, prompt, or photo desc)."""
+    for node in nodes:
+        desc = (node.content_desc or "").strip()
+        if not desc:
+            continue
+        if desc.lower() in BASIC_LABELS:
+            return True
+        if desc.lower().startswith("prompt:"):
+            return True
+        if PHOTO_RE.match(desc):
+            return True
+    return False
+
+
 def collect_profile_fields(
     device,
     width: int,
     height: int,
     match_name: str = "",
     *,
-    max_scrolls: int = 14,
-    stagnant_limit: int = 2,
+    max_scrolls: int = 16,
+    stagnant_limit: int = 3,
+    min_scrolls: int = 8,
 ) -> List[ProfileField]:
     """
     Open Profile tab (if needed), scroll through the profile, return all fields.
     Caller should already be inside the match conversation.
     """
     open_profile_tab(device)
+    nodes = parse_ui_nodes(dump_ui_xml(device))
+    if not _profile_tab_active(nodes):
+        # Retry once — sometimes the first tap hits Chat chrome.
+        open_profile_tab(device)
+
+    # Nudge to top of profile content.
+    for _ in range(2):
+        swipe(
+            device,
+            width // 2,
+            int(height * 0.35),
+            width // 2,
+            int(height * 0.75),
+            280,
+        )
+        time.sleep(0.5)
 
     ordered: List[ProfileField] = []
     seen: Set[str] = set()
@@ -258,20 +290,20 @@ def collect_profile_fields(
         return added
 
     ingest()
-    for _ in range(max_scrolls):
+    for scroll_i in range(max_scrolls):
         swipe(
             device,
             width // 2,
-            int(height * 0.72),
+            int(height * 0.70),
             width // 2,
-            int(height * 0.32),
-            350,
+            int(height * 0.38),
+            320,
         )
-        time.sleep(1.1)
+        time.sleep(1.15)
         added = ingest()
         if added == 0:
             stagnant += 1
-            if stagnant >= stagnant_limit:
+            if scroll_i + 1 >= min_scrolls and stagnant >= stagnant_limit:
                 break
         else:
             stagnant = 0

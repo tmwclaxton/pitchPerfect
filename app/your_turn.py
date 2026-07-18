@@ -154,7 +154,25 @@ def list_match_conversations(
             continue
 
         name = texts[0].strip()
-        if not name or name.lower() in {"matches", "start chat"}:
+        skip_names = {
+            "matches",
+            "start chat",
+            "profile",
+            "chat",
+            "send a message",
+            "local",
+            "hinge",
+            "more",
+            "back",
+        }
+        if not name or name.lower() in skip_names:
+            continue
+        if len(name) > 48:
+            continue
+        # Composer / in-chat chrome sometimes appears if we aren't on Matches.
+        if "messagecomposition" in (node.resource_id or "").lower():
+            continue
+        if "send a message" in joined:
             continue
         # Banner / empty-state rows sometimes look clickable.
         if "waiting for your reply" in joined or "end chats" in joined:
@@ -229,10 +247,35 @@ def _parse_messages_from_nodes(nodes) -> Tuple[List[ChatMessage], List[str]]:
                 timed_nodes.append(("time", node.bounds[1], node.text))
                 continue
 
-        match = MESSAGE_DESC_RE.match(node.content_desc or "")
+        desc = (node.content_desc or "").strip()
+        # Profile-tab / like-prompt chrome is not a chat bubble.
+        if desc.lower().startswith("prompt:"):
+            continue
+        if re.search(r"['’]s photo\s*$", desc, re.I):
+            continue
+        if desc.lower() in {
+            "age",
+            "gender",
+            "sexuality",
+            "job",
+            "height",
+            "location",
+            "education",
+            "school",
+            "languages spoken",
+            "relationship type",
+            "verified",
+            "back",
+            "more",
+        }:
+            continue
+
+        match = MESSAGE_DESC_RE.match(desc)
         if match:
             sender = match.group(1).strip()
             text = match.group(2).strip()
+            if sender.lower() in {"prompt", "chat", "profile"}:
+                continue
             text = re.sub(
                 r"\s*You liked this message\.?\s*$",
                 "",

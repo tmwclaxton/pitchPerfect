@@ -183,9 +183,11 @@ def run_sync(
                 except Exception as exception:
                     print(f"  profile scrape failed: {exception}")
 
+            # Leave profile/chat and land back on Matches list.
             press_back(device)
-            time.sleep(1.0)
+            time.sleep(0.8)
             open_matches(device, width, height)
+            time.sleep(0.6)
 
         if page_new == 0:
             stagnant_pages += 1
