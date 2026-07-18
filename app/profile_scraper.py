@@ -171,6 +171,12 @@ def extract_profile_fields_from_nodes(
     labeled = []
     text_nodes = []
     for node in nodes:
+        rid = (node.resource_id or "").lower()
+        # Ignore composer / send controls that overlay the profile.
+        if "messagecomposition" in rid or "sendmessage" in rid or "microphone" in rid:
+            continue
+        if (node.class_name or "") == "EditText":
+            continue
         desc = (node.content_desc or "").strip()
         text = (node.text or "").strip()
         if desc and desc.lower() in BASIC_LABELS:
