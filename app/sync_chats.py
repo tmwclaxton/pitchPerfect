@@ -34,6 +34,7 @@ from style_learner import messages_as_dicts
 from ui_dump import ensure_hinge_foreground, open_matches, press_back, swipe
 from your_turn import (
     collect_chat_history,
+    conversation_open_for_match,
     list_match_conversations,
     open_conversation,
 )
@@ -41,6 +42,35 @@ from your_turn import (
 # Safety ceiling when the Matches list is huge / count unknown.
 DEFAULT_MAX_CHATS = 200
 DEFAULT_FRESH_HOURS = 24.0
+
+
+def _history_belongs_to_other_match(history, match_name: str) -> bool:
+    """Detect cross-thread scrapes via 'You liked Other's photo' bubbles."""
+    want = (match_name or "").strip().lower()
+    if not want or not history.messages:
+        return False
+    for message in history.messages:
+        text = (message.text or "").strip()
+        sender = (message.sender or "").strip().lower()
+        if sender not in {"you", want} and sender not in {
+            "prompt",
+            "chat",
+            "profile",
+        }:
+            # Bubble attributed to a different person's name.
+            if len(sender) >= 2 and sender != want:
+                return True
+        lower = text.lower()
+        if "you liked " in lower and "'s " in lower:
+            # e.g. "You liked Sara's photo."
+            try:
+                liked = lower.split("you liked ", 1)[1]
+                liked_name = liked.split("'s ", 1)[0].strip()
+            except IndexError:
+                continue
+            if liked_name and liked_name != want:
+                return True
+    return False
 
 
 def _scroll_matches_list(device, width: int, height: int) -> None:
@@ -133,7 +163,19 @@ def run_sync(
                 continue
             seen_names.add(key)
             # Skip UI chrome that sometimes looks like a conversation row.
-            if key in {"profile", "chat", "local", "matches", "hinge"} or len(key) > 48:
+            if key in {
+                "profile",
+                "chat",
+                "local",
+                "matches",
+                "hinge",
+                "sent",
+                "delivered",
+                "read",
+                "liked",
+                "hidden",
+                "new",
+            } or len(key) > 48:
                 continue
 
             page_new += 1
@@ -164,6 +206,14 @@ def run_sync(
                 print("  skip: could not stay in Hinge after opening chat")
                 open_matches(device, width, height, settle_s=0.8)
                 continue
+            if not conversation_open_for_match(device, conversation.name):
+                print(
+                    f"  skip: open screen is not {conversation.name}'s chat "
+                    "(stale row / wrong tap)"
+                )
+                press_back(device, settle_s=0.45)
+                open_matches(device, width, height, settle_s=0.8)
+                continue
 
             history = collect_chat_history(
                 device,
@@ -173,6 +223,14 @@ def run_sync(
                 settle_bottom=False,
             )
             history.is_new_match = conversation.is_new_match
+            if _history_belongs_to_other_match(history, conversation.name):
+                print(
+                    f"  skip: scraped messages look like another match "
+                    f"(not {conversation.name})"
+                )
+                press_back(device, settle_s=0.45)
+                open_matches(device, width, height, settle_s=0.8)
+                continue
 
             result = upsert_match_history(
                 conversation.name,

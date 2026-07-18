@@ -80,6 +80,36 @@ def _applied_versions(conn: sqlite3.Connection) -> set:
     return {int(row[0]) for row in rows}
 
 
+_JUNK_MATCH_NAMES = {
+    "profile",
+    "chat",
+    "local",
+    "matches",
+    "hinge",
+    "sent",
+    "delivered",
+    "read",
+    "liked",
+    "search",
+    "gt",
+    "send a message",
+}
+
+
+def _is_junk_legacy_name(name: str) -> bool:
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return True
+    key = cleaned.lower()
+    if key in _JUNK_MATCH_NAMES:
+        return True
+    if len(cleaned) > 48:
+        return True
+    if len(cleaned.split()) >= 5 and any(ch in cleaned for ch in ".,?!"):
+        return True
+    return False
+
+
 def _migrate_legacy_conversations(conn: sqlite3.Connection) -> int:
     """Copy blob conversations.messages_json into matches + messages once."""
     if not _table_exists(conn, "conversations") or not _table_exists(conn, "matches"):
@@ -99,6 +129,8 @@ def _migrate_legacy_conversations(conn: sqlite3.Connection) -> int:
     migrated = 0
     for row in legacy_rows:
         name = row["match_name"]
+        if _is_junk_legacy_name(name):
+            continue
         name_key = name.strip().lower()
         existing = conn.execute(
             "SELECT id FROM matches WHERE name_key = ?", (name_key,)

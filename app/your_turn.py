@@ -180,6 +180,19 @@ def list_match_conversations(
             "google tv",
             "search",
             "gt",
+            "sent",
+            "delivered",
+            "read",
+            "liked",
+            "active",
+            "online",
+            "new",
+            "today",
+            "yesterday",
+            "hidden",
+            "hidden matches",
+            "their turn",
+            "your turn",
         }
         if not name or name.lower() in skip_names:
             continue
@@ -427,6 +440,46 @@ def open_conversation(
 ) -> None:
     tap_bounds(device, conversation.bounds)
     time.sleep(max(0.4, float(settle_s)))
+
+
+def conversation_open_for_match(device, match_name: str) -> bool:
+    """
+    True when the open screen looks like this match's chat/profile
+    (header name + chat chrome), not the Matches list or another thread.
+    """
+    from ui_dump import is_hinge_xml
+
+    xml_text = dump_ui_xml(device)
+    if not is_hinge_xml(xml_text):
+        return False
+    nodes = parse_ui_nodes(xml_text)
+    want = (match_name or "").strip().lower()
+    if not want:
+        return False
+
+    has_composer = any(is_composer_node(node) for node in nodes)
+    has_chat_tab = any(
+        (node.text or "").strip().lower() == "chat" and node.bounds[1] < 900
+        for node in nodes
+    )
+    has_profile_tab = any(
+        (node.text or "").strip().lower() == "profile" and node.bounds[1] < 900
+        for node in nodes
+    )
+    if not (has_composer or (has_chat_tab and has_profile_tab)):
+        return False
+
+    # Name usually appears as header text or "Name, verified" content-desc.
+    for node in nodes:
+        text = (node.text or "").strip().lower()
+        desc = (node.content_desc or "").strip().lower()
+        if text == want or desc == want:
+            return True
+        if desc.startswith(want + ",") or desc.startswith(want + " "):
+            return True
+        if text.startswith(want + ",") or text.startswith(want + " "):
+            return True
+    return False
 
 
 def _composer_text(device) -> str:

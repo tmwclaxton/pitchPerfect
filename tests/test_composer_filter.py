@@ -5,8 +5,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from profile_scraper import extract_profile_fields_from_nodes
+from sync_chats import _history_belongs_to_other_match
 from ui_dump import composer_draft_texts, is_composer_node, parse_ui_nodes
-from your_turn import _parse_messages_from_nodes
+from your_turn import ChatMessage, ConversationHistory, _parse_messages_from_nodes
 
 
 CHAT_WITH_DRAFT_XML = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
@@ -74,6 +75,24 @@ class ComposerFilterTest(unittest.TestCase):
         self.assertTrue(any("outgrown" in t for t in texts))
         self.assertFalse(any("whatsapp" in t for t in texts))
         self.assertFalse(any("send a message" in t for t in texts))
+
+    def test_detects_cross_match_history(self):
+        wrong = ConversationHistory(
+            name="Luana",
+            messages=[
+                ChatMessage("You", "You liked Chaeyun's photo."),
+                ChatMessage("Chaeyun", "Sorry for late respond"),
+            ],
+        )
+        self.assertTrue(_history_belongs_to_other_match(wrong, "Luana"))
+        right = ConversationHistory(
+            name="Luana",
+            messages=[
+                ChatMessage("You", "You liked Luana's photo."),
+                ChatMessage("Luana", "hey"),
+            ],
+        )
+        self.assertFalse(_history_belongs_to_other_match(right, "Luana"))
 
 
 if __name__ == "__main__":
