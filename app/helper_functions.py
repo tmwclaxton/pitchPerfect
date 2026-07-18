@@ -116,7 +116,7 @@ def type_text_slow(device, text, per_char_delay=0.1):
         time.sleep(per_char_delay)
 
 
-# Use to connect directly
+# Use to connect directly (user_ip_address = ADB server host, usually 127.0.0.1)
 def connect_device(user_ip_address="127.0.0.1"):
     adb = AdbClient(host=user_ip_address, port=5037)
     devices = adb.devices()
@@ -142,6 +142,27 @@ def connect_device_remote(user_ip_address="127.0.0.1"):
     device = devices[0]
     print(f"Connected to {device.serial}")
     return device
+
+
+def connect_device_auto():
+    """
+    Connect using config:
+    - ADB_SERVER_HOST: where the adb server listens (127.0.0.1 locally,
+      host.docker.internal from Docker)
+    - DEVICE_IP: optional phone LAN IP for wireless `adb connect`
+    """
+    from config import ADB_SERVER_HOST, DEVICE_IP
+
+    server_host = ADB_SERVER_HOST or "127.0.0.1"
+    phone_ip = (DEVICE_IP or "").strip()
+    if phone_ip and phone_ip not in {"127.0.0.1", "localhost", "host.docker.internal"}:
+        adb = AdbClient(host=server_host, port=5037)
+        try:
+            result = adb.remote_connect(phone_ip, 5555)
+            print(f"Wireless adb connect {phone_ip}:5555 -> {result}")
+        except Exception as exception:
+            print(f"Wireless adb connect failed ({exception}); trying listed devices.")
+    return connect_device(server_host)
 
 
 def capture_screenshot(device, filename):
