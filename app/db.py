@@ -9,7 +9,7 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 from config import SQLITE_PATH
 from migrate import apply_migrations, ensure_parent_dir
@@ -644,6 +644,19 @@ def list_recent_drafts(limit: int = 20) -> List[Dict[str, Any]]:
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def pasted_draft_match_names() -> Set[str]:
+    """Lowercased match names that already have a pasted draft in SQLite."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT lower(match_name) AS name
+            FROM draft_replies
+            WHERE pasted = 1 AND match_name IS NOT NULL AND trim(match_name) != ''
+            """
+        ).fetchall()
+    return {str(row["name"]) for row in rows if row["name"]}
 
 
 def load_all_you_messages(limit: int = 5000) -> List[Dict[str, Any]]:

@@ -465,6 +465,15 @@ def _looks_like_discover_feed(nodes: List[UiNode], height: int) -> Optional[str]
     )
     if top_titles and not has_matches_title:
         return top_titles[0]
+
+    # Most Compatible / Discover card chrome (no selected= on some builds).
+    feed_chrome = 0
+    for node in nodes:
+        label = ((node.content_desc or node.text) or "").strip().lower()
+        if label in {"like photo", "most compatible"} or label.startswith("skip "):
+            feed_chrome += 1
+    if feed_chrome >= 2 and not has_matches_title:
+        return SCREEN_DISCOVER
     return None
 
 
@@ -741,17 +750,17 @@ def matches_list_visible(nodes: List[UiNode], height: int) -> bool:
     feed = _looks_like_discover_feed(nodes, height)
     if feed:
         return False
+    # Require list chrome — bottom-nav "Matches" alone is always present on
+    # Discover/Standouts/Likes You and must not short-circuit open_matches.
+    if _matches_list_headers_visible(nodes):
+        return True
     for node in nodes:
-        text = (node.text or "").strip().lower()
-        if text.startswith("your turn") or text.startswith("their turn"):
+        if node.bounds[1] > int(height * 0.25):
+            continue
+        label = ((node.text or node.content_desc) or "").strip().lower()
+        if label == "matches" or label.startswith("matches,"):
             return True
-    nav = [
-        node
-        for node in find_nodes(nodes, desc_contains="Matches")
-        if node.bounds[1] > int(height * 0.88)
-    ]
-    # Bottom-nav Matches alone is weak; require we are not in a thread/feed.
-    return bool(nav)
+    return False
 
 
 def open_matches(

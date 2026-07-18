@@ -681,12 +681,29 @@ def focus_composer_and_type(device, text: str) -> bool:
     return True
 
 
-def ensure_matches_your_turn(device, width: int, height: int) -> None:
+def ensure_matches_your_turn(
+    device,
+    width: int,
+    height: int,
+    *,
+    seek_top: bool = False,
+) -> None:
+    """
+    Land on the Matches tab. By default do NOT fling to top when the Your turn
+    header has scrolled off — that undoes deep list progress during --all.
+    Pass seek_top=True only at run start (or after hard recovery).
+    """
+    from ui_dump import matches_list_visible
+
     open_matches(device, width, height)
     nodes = parse_ui_nodes(dump_ui_xml(device))
     headers = find_nodes(nodes, text_contains="Your turn")
-    if not headers:
-        # Try scrolling the matches list to the top.
+    if headers:
+        return
+    if not seek_top and matches_list_visible(nodes, height):
+        return
+    # Header missing and we need the top of Your turn — fling upward.
+    for _ in range(3 if seek_top else 1):
         swipe(
             device,
             width // 2,
@@ -696,3 +713,6 @@ def ensure_matches_your_turn(device, width: int, height: int) -> None:
             300,
         )
         time.sleep(0.3)
+        nodes = parse_ui_nodes(dump_ui_xml(device))
+        if find_nodes(nodes, text_contains="Your turn"):
+            return

@@ -26,7 +26,7 @@ from config import (
     YOUR_TURN_PASTE_DRAFTS,
 )
 from data_store import store_draft_reply
-from db import finish_run, start_run, store_conversation
+from db import finish_run, pasted_draft_match_names, start_run, store_conversation
 from device_lock import acquire_device_lock
 from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
 from reply_drafter import draft_scored_reply
@@ -36,6 +36,7 @@ from your_turn import (
     ConversationHistory,
     collect_chat_history,
     conversation_open_for_match,
+    conversation_row_tappable,
     ensure_matches_your_turn,
     focus_composer_and_type,
     list_match_conversations,
@@ -46,18 +47,31 @@ from your_turn import (
 
 # Safety ceiling when --all is set and the UI count can't be read.
 ALL_CHATS_FALLBACK_LIMIT = 50
+# Matches list often needs several scrolls past already-handled rows.
+STAGNANT_PAGE_LIMIT = 12
 
 
 def _scroll_matches_list(device, width: int, height: int) -> None:
+    # Keep swipes inside the conversation RecyclerView (not bottom nav).
+    # Dual swipe matches sync_capture — single short swipes often don't advance.
     swipe(
         device,
         width // 2,
-        int(height * 0.75),
+        int(height * 0.62),
         width // 2,
-        int(height * 0.40),
-        400,
+        int(height * 0.36),
+        280,
     )
-    time.sleep(1.2)
+    time.sleep(0.35)
+    swipe(
+        device,
+        width // 2,
+        int(height * 0.58),
+        width // 2,
+        int(height * 0.34),
+        240,
+    )
+    time.sleep(0.3)
 
 
 def _connect():
@@ -206,7 +220,8 @@ def run_init_style(max_chats: int, *, from_db: bool = False) -> None:
 def _scroll_matches_to_your_turn(device, width: int, height: int) -> None:
     """Fling Matches upward until Your turn count is readable."""
     ensure_hinge_foreground(device, settle_s=0.6)
-    open_matches(device, width, height, settle_s=0.3)
+    open_matches(device, width, height, settle_s=0.5)
+    ensure_matches_your_turn(device, width, height, seek_top=True)
     for _ in range(10):
         if your_turn_count(device) is not None:
             return
@@ -219,7 +234,7 @@ def _scroll_matches_to_your_turn(device, width: int, height: int) -> None:
             260,
         )
         time.sleep(0.25)
-    ensure_matches_your_turn(device, width, height)
+    ensure_matches_your_turn(device, width, height, seek_top=True)
 
 
 def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
@@ -230,7 +245,8 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
     open_hinge(device=device, settle_s=0.6, force=True)
     _scroll_matches_to_your_turn(device, width, height)
 
-    max_stagnant = 8 if process_all else 3
+    max_stagnant = STAGNANT_PAGE_LIMIT if process_all else 3
+    counted = None
     if process_all:
         counted = your_turn_count(device)
         max_chats = counted if counted is not None else ALL_CHATS_FALLBACK_LIMIT
@@ -245,39 +261,73 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
         "your_turn_drafts",
         {"max_chats": max_chats, "paste": paste, "all": process_all},
     )
-    processed_names = set()
+    # Already-pasted names skip re-draft. Do not seed seen_names with them —
+    # that stagnant-exits before scrolling to unhandled rows further down.
+    already_pasted = pasted_draft_match_names()
+    if already_pasted:
+        print(f"Skipping {len(already_pasted)} already-pasted match(es).")
+    seen_names: set[str] = set()
+    drafted_names: set[str] = set()
+    skipped_pasted = 0
     stagnant_pages = 0
+    list_page = 0
 
-    while len(processed_names) < max_chats and stagnant_pages < max_stagnant:
+    def _accounted() -> int:
+        return len(drafted_names) + skipped_pasted
+
+    while _accounted() < max_chats and stagnant_pages < max_stagnant:
         if not ensure_hinge_foreground(device, settle_s=0.5):
             print("Aborting drafts: could not keep Hinge foreground")
             break
         ensure_matches_your_turn(device, width, height)
         conversations = list_your_turn_conversations(device)
+        # After leaving Hinge (e.g. Instagram), Matches can dump empty until
+        # we force-reopen and scroll back to Your turn.
+        if not conversations:
+            print("  empty Your Turn list; hard-recovering Matches")
+            open_hinge(device=device, settle_s=0.6, force=True)
+            _scroll_matches_to_your_turn(device, width, height)
+            conversations = list_your_turn_conversations(device)
         page_new = 0
+        list_page += 1
 
         for conversation in conversations:
-            if len(processed_names) >= max_chats:
+            if _accounted() >= max_chats:
                 break
-            if conversation.name.lower() in processed_names:
+            key = conversation.name.lower()
+            if key in seen_names:
+                continue
+
+            if not conversation_row_tappable(conversation, height=height):
+                print(f"  defer: {conversation.name} under bottom nav")
+                page_new += 1
                 continue
 
             page_new += 1
-            key = conversation.name.lower()
-            processed_names.add(key)
-            print(f"\n=== {conversation.name} ({len(processed_names)}/{max_chats}) ===")
+            seen_names.add(key)
+
+            if key in already_pasted:
+                skipped_pasted += 1
+                print(
+                    f"\n=== skip pasted: {conversation.name} "
+                    f"({_accounted()}/{max_chats}) ==="
+                )
+                continue
+
+            print(f"\n=== {conversation.name} ({_accounted() + 1}/{max_chats}) ===")
             print(f"Preview: {conversation.preview}")
 
             if not open_conversation(device, conversation, height=height):
                 print(f"  defer: {conversation.name} under bottom nav")
-                processed_names.discard(key)
+                seen_names.discard(key)
                 continue
             if not conversation_open_for_match(
                 device, conversation.name, height=height
             ):
                 print(f"  skip: not in {conversation.name}'s chat after tap")
-                ensure_hinge_foreground(device, settle_s=0.5)
-                ensure_matches_your_turn(device, width, height)
+                seen_names.discard(key)
+                open_hinge(device=device, settle_s=0.6, force=True)
+                _scroll_matches_to_your_turn(device, width, height)
                 continue
 
             history = collect_chat_history(
@@ -345,6 +395,9 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
                 conversation_id=conversation_id,
                 run_id=run_id,
             )
+            drafted_names.add(key)
+            if pasted:
+                already_pasted.add(key)
 
             press_back(device, check_hinge=False)
             time.sleep(0.4)
@@ -353,14 +406,45 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
 
         if page_new == 0:
             stagnant_pages += 1
+            print(
+                f"  list page {list_page}: no new rows "
+                f"(stagnant {stagnant_pages}/{max_stagnant}, "
+                f"visible={len(conversations)})"
+            )
+            if not conversations and stagnant_pages in {1, 3, 6, 9}:
+                open_hinge(device=device, settle_s=0.6, force=True)
+                _scroll_matches_to_your_turn(device, width, height)
+            elif conversations and stagnant_pages in {2, 5, 8}:
+                # Stuck on the same visible rows — one hard seek-top then resume.
+                print("  stagnant with repeats; re-seek Your turn then scroll")
+                ensure_matches_your_turn(device, width, height, seek_top=True)
         else:
             stagnant_pages = 0
 
-        if len(processed_names) < max_chats:
-            _scroll_matches_list(device, width, height)
+        if _accounted() < max_chats and stagnant_pages < max_stagnant:
+            if conversations:
+                _scroll_matches_list(device, width, height)
+                # Extra fling when we've already seen everyone on-screen.
+                if page_new == 0:
+                    _scroll_matches_list(device, width, height)
+            else:
+                # Scrolling an empty/non-Matches dump does nothing useful.
+                open_hinge(device=device, settle_s=0.6, force=True)
+                _scroll_matches_to_your_turn(device, width, height)
 
-    finish_run(run_id, {"drafted": len(processed_names)})
-    print(f"\nDone. Drafted replies for {len(processed_names)} chat(s).")
+    finish_run(
+        run_id,
+        {
+            "drafted": len(drafted_names),
+            "skipped_pasted": skipped_pasted,
+            "listed": counted,
+        },
+    )
+    print(
+        f"\nDone. Drafted replies for {len(drafted_names)} chat(s)"
+        + (f", skipped {skipped_pasted} already-pasted" if skipped_pasted else "")
+        + "."
+    )
     print("Saved to SQLite — nothing was sent.")
 
 
