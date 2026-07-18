@@ -91,18 +91,58 @@ def _ensure_matches_list(
 def _scroll_matches_list(device, width: int, height: int) -> bool:
     if not _ensure_matches_list(device, width, height, why="before Matches list scroll"):
         return False
-    # Longer, slower fling so Hinge actually advances past the current page.
-    for _ in range(2):
-        swipe(
-            device,
-            width // 2,
-            int(height * 0.82),
-            width // 2,
-            int(height * 0.22),
-            420,
-        )
-        time.sleep(0.35)
+    # Swipe inside the conversation list only. Starts at ~0.82 land on
+    # Hidden / bottom-nav chrome and the RecyclerView never advances into
+    # Their turn / Hidden rows.
+    swipe(
+        device,
+        width // 2,
+        int(height * 0.62),
+        width // 2,
+        int(height * 0.36),
+        280,
+    )
+    time.sleep(0.35)
+    swipe(
+        device,
+        width // 2,
+        int(height * 0.58),
+        width // 2,
+        int(height * 0.34),
+        240,
+    )
+    time.sleep(0.3)
     return True
+
+
+def _expand_matches_sections(device, height: int) -> bool:
+    """
+    Tap visible Their turn / Hidden headers so collapsed sections open.
+    Returns True if a header was tapped.
+    """
+    from ui_dump import parse_ui_nodes, tap_bounds
+
+    xml_text = dump_ui_xml(device)
+    nodes = parse_ui_nodes(xml_text)
+    tapped = False
+    nav_y = int(height * 0.88)
+    for label in ("their turn", "hidden"):
+        for node in nodes:
+            text = (node.text or "").strip().lower()
+            if not text.startswith(label):
+                continue
+            if node.bounds[1] >= nav_y:
+                continue
+            # Only tap when the header is mid/lower list (section still closed
+            # or just revealed) — not the sticky title under the top bar.
+            if node.bounds[1] < int(height * 0.25):
+                continue
+            print(f"  expanding section: {(node.text or '').strip()}")
+            tap_bounds(device, node.bounds)
+            time.sleep(0.45)
+            tapped = True
+            break
+    return tapped
 
 
 def _scroll_matches_to_top(device, width: int, height: int, passes: int = 3) -> None:
@@ -764,6 +804,11 @@ def run_capture(
                     f"(stagnant {stagnant_pages}/12, "
                     f"visible={len(conversations)})"
                 )
+                # Collapsed Their turn / Hidden blocks scrolling into older rows.
+                if stagnant_pages in {1, 3, 6} and _expand_matches_sections(
+                    device, height
+                ):
+                    stagnant_pages = max(0, stagnant_pages - 1)
             else:
                 stagnant_pages = 0
             run.meta["stagnant_pages"] = stagnant_pages
