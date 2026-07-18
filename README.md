@@ -66,35 +66,41 @@ By integrating these components, the script can make automated decisions (like o
 ## Setup
 
 1. **Add your NanoGPT configuration**:
-   Copy `.env-template` to `.env`, then add your NanoGPT key and phone's IP address:
+   Copy `.env-template` to `.env`, then add your NanoGPT key:
    ```env
    NANOGPT_API_KEY=your-api-key
    NANOGPT_BASE_URL=https://nano-gpt.com/api/v1
    NANOGPT_MODEL=openai/gpt-4.1-mini
-   DEVICE_IP=your-phone-ip
-   ```
-2. **Build the docker container**:
-
-   ```
-   docker build -t my-ocr-bot -f .\docker\Dockerfile .
    ```
 
-3. **Run the docker container**:
-   ```
-   docker run my-ocr-bot
+2. **Install deps** (host / recommended for USB adb on macOS):
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r app/requirements.txt
    ```
 
-**Note: To debug**:
-In case of weird behaviour, open the container and check what's up.
+## Your Turn reply drafting
 
+Data lives in SQLite (`app/data/pitchperfect.db` locally, `/data/pitchperfect.db` in Docker): drafts, chat transcripts, learned style, run metadata.
+
+**Host (preferred with USB):**
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+cd app
+../.venv/bin/python draft_replies.py --init-style          # learn your texting style from Matches
+../.venv/bin/python draft_replies.py --max-chats 2         # smoke test
+../.venv/bin/python draft_replies.py --all                 # draft all Your Turn (paste, never send)
+../.venv/bin/python draft_replies.py --all --no-paste      # save only
 ```
-docker run -it --entrypoint /bin/bash my-ocr-bot
+
+**Docker** (wireless adb works better than USB-on-mac):
+```bash
+# On host: adb tcpip 5555 && adb connect PHONE_IP:5555
+# Ensure host adb server is reachable (ADB_SERVER_HOST=host.docker.internal).
+docker compose --profile tools build
+docker compose --profile tools run --rm pitchperfect python draft_replies.py --init-style
+docker compose --profile tools run --rm pitchperfect python draft_replies.py --all --no-paste
 ```
 
-To connect wirelessly from shell
-
-```
-adb tcpip 5555
-
-adb connect 192.168.X.Y:5555
-```
+Limitations: macOS USB devices are attached to the host adb server; containers cannot see them unless you forward adb (`adb -a nodaemon server`) and set `ADB_SERVER_HOST=host.docker.internal`.

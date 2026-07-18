@@ -1,42 +1,34 @@
 # docker/Dockerfile
+# Local USB adb is awkward in Docker on macOS — prefer host:
+#   cd app && ../.venv/bin/python draft_replies.py --init-style
+# Docker path works best with wireless adb (DEVICE_IP) via host.docker.internal.
 FROM python:3.9-slim
 
-# Install system dependencies for OCR, spaCy, etc.
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libffi-dev \
     libssl-dev \
-    wget \
+    libgl1 \
     tesseract-ocr \
     libtesseract-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Add apt-get instructions to install libGL
-RUN apt-get update && \
-    apt-get install -y libgl1-mesa-glx && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install ADB into container
-RUN apt-get update && apt-get install -y \
     adb \
-    # plus any other dependencies
     && rm -rf /var/lib/apt/lists/*
 
-# Make work directoy
 WORKDIR /app
-COPY app/requirements.txt requirements.txt
 
-COPY .env .env
-
-# Install compatible numpy and other dependencies from requirements.txt
-RUN pip install --no-cache-dir numpy==1.21.6
-RUN pip install --no-cache-dir -r requirements.txt
+COPY app/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt \
+    && python -m spacy download en_core_web_sm
 
 COPY app/ /app/
 
-# Download spaCy English model
-RUN python -m spacy download en_core_web_sm
+ENV SQLITE_PATH=/data/pitchperfect.db \
+    PYTHONUNBUFFERED=1 \
+    ADB_SERVER_HOST=host.docker.internal
 
-EXPOSE 8000
+RUN mkdir -p /data /app/images
 
-CMD ["bash", "-c", "adb start-server && python main.py"]
+VOLUME ["/data", "/app/images"]
+
+# Default: show CLI help. Override with compose/run command.
+CMD ["python", "draft_replies.py", "--help"]

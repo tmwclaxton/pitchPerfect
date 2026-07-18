@@ -1,0 +1,42 @@
+# Pitch Perfect — local Docker helpers
+#
+# Preferred on macOS/USB: run on the host against adb.
+#   export PATH="/opt/homebrew/bin:$PATH"
+#   cd app && ../.venv/bin/python draft_replies.py --init-style
+#   cd app && ../.venv/bin/python draft_replies.py --all
+#
+# Docker (wireless adb recommended):
+#   1) On host: adb tcpip 5555 && adb connect PHONE_IP:5555
+#   2) Set DEVICE_IP=PHONE_IP in .env (container reaches host via host.docker.internal
+#      only if you proxy; for direct LAN use the phone IP and network_mode/host notes).
+#   3) docker compose run --rm pitchperfect python draft_replies.py --init-style
+#
+# SQLite persists in the named volume `pitchperfect-data` at /data/pitchperfect.db
+
+services:
+  pitchperfect:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file:
+      - .env
+    environment:
+      SQLITE_PATH: /data/pitchperfect.db
+      ADB_SERVER_HOST: ${ADB_SERVER_HOST:-host.docker.internal}
+      DEVICE_IP: ${DEVICE_IP:-}
+      YOUR_TURN_PASTE_DRAFTS: ${YOUR_TURN_PASTE_DRAFTS:-true}
+      YOUR_TURN_MAX_CHATS: ${YOUR_TURN_MAX_CHATS:-13}
+      STYLE_INIT_MAX_CHATS: ${STYLE_INIT_MAX_CHATS:-25}
+    volumes:
+      - pitchperfect-data:/data
+      - ./app/images:/app/images
+    # Extra hosts so container can talk to adb on the Mac host when using
+    # `adb -a nodaemon server` / wireless connect via host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    working_dir: /app
+    # Keep container off by default; use `docker compose run`.
+    profiles: ["tools"]
+
+volumes:
+  pitchperfect-data:
