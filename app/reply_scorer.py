@@ -33,6 +33,53 @@ CRINGE_PHRASES = [
     r"\bspot near\b",
 ]
 
+# ChatGPT-ish / brochure phrasing.
+AI_TROPE_PHRASES = [
+    r"\babsolutely\b",
+    r"\blooking forward\b",
+    r"\bthrilled\b",
+    r"\bdelighted\b",
+    r"\btestament\b",
+    r"\btapestry\b",
+    r"\bdelve\b",
+    r"\bvibrant\b",
+    r"\bcurated\b",
+    r"\bnestled\b",
+    r"\bmoreover\b",
+    r"\bfurthermore\b",
+    r"\bindeed\b",
+    r"\bit'?s worth noting\b",
+    r"\bin today'?s\b",
+    r"\blet me know your thoughts\b",
+    r"\bi'?d be happy to\b",
+    r"\bkeen to\b",
+    r"\bshall we\b",
+    r"\bnot only\b.+\bbut also\b",
+    r"\bas an ai\b",
+]
+
+# Overly polite / formal softener language.
+POLITE_PHRASES = [
+    r"\bplease\b",
+    r"\bkindly\b",
+    r"\bwould you mind\b",
+    r"\bif that'?s (ok|okay|alright|all right)\b",
+    r"\bthank you so much\b",
+    r"\bthanks so much\b",
+    r"\bhope you'?re well\b",
+    r"\bhope this (helps|finds)\b",
+    r"\bjust wanted to\b",
+    r"\bfeel free\b",
+    r"\bdon'?t hesitate\b",
+    r"\bit would be my pleasure\b",
+    r"\bhope that works\b",
+    r"\bno problem at all\b",
+    r"\btotally understand\b",
+    r"\bif you'?re comfortable\b",
+]
+
+EM_DASH_RE = re.compile(r"[—–―]")
+
 
 def _last_their_message(history: ConversationHistory) -> str:
     for message in reversed(history.messages):
@@ -111,6 +158,13 @@ def heuristic_scores(reply: str, history: ConversationHistory) -> Dict[str, floa
         re.IGNORECASE,
     ):
         low_investment -= 2.0
+
+    polite_hits = sum(
+        1 for pattern in POLITE_PHRASES if re.search(pattern, reply, re.IGNORECASE)
+    )
+    if polite_hits:
+        low_investment -= min(4.5, 1.8 * polite_hits)
+
     low_investment = max(0.0, min(10.0, low_investment))
 
     specificity = 6.5
@@ -183,6 +237,24 @@ def heuristic_scores(reply: str, history: ConversationHistory) -> Dict[str, floa
     if word_count >= 20:
         natural -= 1.5
 
+    ai_hits = sum(
+        1 for pattern in AI_TROPE_PHRASES if re.search(pattern, reply, re.IGNORECASE)
+    )
+    if ai_hits:
+        natural = max(0.0, natural - min(5.0, 2.0 * ai_hits))
+        low_investment = max(0.0, low_investment - min(3.0, 1.2 * ai_hits))
+        cringe_risk = min(10.0, cringe_risk + min(4.0, 1.5 * ai_hits))
+    if polite_hits:
+        natural = max(0.0, natural - min(4.0, 1.5 * polite_hits))
+        cringe_risk = min(10.0, cringe_risk + min(3.0, 1.2 * polite_hits))
+
+    # Em dashes are a hard AI tell in dating texts.
+    em_dash_count = len(EM_DASH_RE.findall(reply))
+    if em_dash_count:
+        natural = max(0.0, natural - min(6.0, 3.0 * em_dash_count))
+        cringe_risk = min(10.0, cringe_risk + min(5.0, 2.5 * em_dash_count))
+        low_investment = max(0.0, low_investment - min(3.0, 1.5 * em_dash_count))
+
     return {
         "brevity": round(min(10.0, max(0.0, brevity)), 2),
         "low_investment": round(low_investment, 2),
@@ -191,15 +263,23 @@ def heuristic_scores(reply: str, history: ConversationHistory) -> Dict[str, floa
         "naturalness": round(max(0.0, natural), 2),
         "contact_fit": round(contact_fit, 2),
         "cringe_penalty": round(max(0.0, cringe_risk), 2),
+        "ai_trope_hits": float(ai_hits),
+        "polite_hits": float(polite_hits),
+        "em_dash_count": float(em_dash_count),
         "word_count": float(word_count),
         "sentence_count": float(sentences),
     }
 
 
 SCORE_SYSTEM = """You judge dating-app replies the way a blunt men's dating coach would.
-Prefer short, calm, specific texts. Punish try-hard, needy, essay-like, or AI-suave lines.
-Especially punish: "no worries", invented venues, "what do you say", long setups.
-Asking for Instagram/WhatsApp is good only when rapport/plan is established and the ask is light — punish early or pushy contact asks.
+Prefer short, calm, specific texts that sound like a real guy texting.
+Punish try-hard, needy, essay-like, AI-suave, or overly polite lines.
+Especially punish:
+- AI tropes / ChatGPT tone (absolutely, looking forward, delve, vibrant, curated, "let me know your thoughts")
+- Overly polite softener language (please, kindly, hope you're well, feel free, just wanted to)
+- Em dashes (—) or en dashes used as fancy punctuation
+- "no worries", invented venues, "what do you say", long setups
+Asking for Instagram/WhatsApp is good only when rapport/plan is established and the ask is light; punish early or pushy contact asks.
 Score each metric 0-10. Return JSON only."""
 
 
@@ -222,11 +302,12 @@ Score JSON with keys:
 - low_investment (higher = cooler, not needy)
 - specificity (higher = concrete detail/plan, not vague)
 - ease_of_reply (higher = easy for them to answer)
-- naturalness (higher = sounds like a real guy texting)
+- naturalness (higher = sounds like a real guy texting, not AI)
 - contact_fit (higher = right time/tone for IG/WhatsApp ask, or correctly skipped)
 - anti_cringe (higher = NOT cringe; 10 = clean, 0 = very cringe)
 - overall (0-10 weighted gut check)
 - reason (one short clause)
+Hard caps: if the reply uses an em dash (—), or sounds AI/overly polite, anti_cringe and naturalness should be <= 4.
 """
     return service.chat_json(
         [
@@ -274,8 +355,12 @@ def score_reply(
             "reason": f"model score failed: {exception}",
         }
     total = aggregate_score(local, judged)
-    # Hard floor for banned-soft replies so they almost never win.
+    # Hard floor for banned-soft / AI-ish replies so they almost never win.
     if local["low_investment"] <= 3.0:
+        total = min(total, 6.0)
+    if local.get("em_dash_count", 0) > 0:
+        total = min(total, 5.5)
+    if local.get("ai_trope_hits", 0) >= 2 or local.get("polite_hits", 0) >= 2:
         total = min(total, 6.0)
     return {
         "reply": reply,
