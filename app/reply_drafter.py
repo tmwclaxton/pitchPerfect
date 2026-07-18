@@ -44,7 +44,7 @@ BANNED_SNIPPETS = [
     r"\bbet i can\b",
     r"\bcan'?t wait\b",
     r"\bwe should (hang|meet) sometime\b",
-    r"\b(whatsapp|instagram|insta|\big\b).{0,40}\b(whatsapp|instagram|insta|\big\b)\b",
+    r"\b(whatsapp|instagram|insta|ig).{0,40}\b(whatsapp|instagram|insta|ig)\b",
     r"\blooking forward\b",
     r"\bhope you'?re well\b",
     r"\bfeel free\b",

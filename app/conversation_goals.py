@@ -42,7 +42,7 @@ def contact_already_exchanged(history: ConversationHistory) -> bool:
     blob = " ".join(message.text for message in history.messages).lower()
     return bool(
         re.search(
-            r"\b(instagram|insta|\big\b|whatsapp|whats ?app|@\w+|0\d{10}|\+44)\b",
+            r"\b(instagram|insta|ig|whatsapp|whats ?app|@\w+|0\d{10}|\+44)\b",
             blob,
         )
     )

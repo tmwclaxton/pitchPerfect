@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import re
 import statistics
-from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from db import load_style_profile, save_style_profile
@@ -61,7 +60,7 @@ def heuristic_style(histories: List[ConversationHistory]) -> Dict[str, Any]:
     contact_examples = [
         s
         for s in samples
-        if re.search(r"\b(instagram|insta|ig\b|whatsapp|whats ?app|number)\b", s, re.I)
+        if re.search(r"\b(instagram|insta|ig|whatsapp|whats ?app|number)\b", s, re.I)
     ][:5]
     plan_examples = [
         s

@@ -104,7 +104,7 @@ def _you_suggested_plan(history: ConversationHistory) -> bool:
 def _asks_for_contact(reply: str) -> bool:
     return bool(
         re.search(
-            r"\b(instagram|insta|\big\b|whatsapp|whats ?app|your number)\b",
+            r"\b(instagram|insta|ig|whatsapp|whats ?app|your number)\b",
             reply,
             re.IGNORECASE,
         )

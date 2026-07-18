@@ -45,7 +45,7 @@ class ConversationHistory:
 
     def as_transcript(self) -> str:
         if not self.messages:
-            return "(No messages yet — this is a new match.)"
+            return "(No messages yet - this is a new match.)"
         lines = []
         for message in self.messages:
             stamp = f" [{message.timestamp}]" if message.timestamp else ""
@@ -64,13 +64,48 @@ def your_turn_count(device) -> Optional[int]:
     return None
 
 
+def _section_y_range(
+    nodes,
+    *,
+    start_label: str,
+    end_labels: Tuple[str, ...],
+) -> Optional[Tuple[int, Optional[int]]]:
+    """
+    Return (start_y, end_y) for a Matches list section.
+    end_y is None when the end header is not on screen (section continues below).
+    """
+    start_y: Optional[int] = None
+    end_y: Optional[int] = None
+    for node in nodes:
+        text = (node.text or "").strip().lower()
+        if not text:
+            continue
+        if start_y is None and text.startswith(start_label.lower()):
+            start_y = node.bounds[1]
+            continue
+        if start_y is not None and end_y is None:
+            if any(text.startswith(label.lower()) for label in end_labels):
+                end_y = node.bounds[1]
+    if start_y is None:
+        return None
+    return start_y, end_y
+
+
 def list_match_conversations(
     device,
     *,
     skip_new_matches: bool = False,
+    only_your_turn: bool = False,
 ) -> List[ConversationPreview]:
-    """List visible Matches-tab conversations (Your Turn and beyond)."""
+    """List visible Matches-tab conversations (Your Turn and/or beyond)."""
     nodes = parse_ui_nodes(dump_ui_xml(device))
+    your_turn_range = None
+    if only_your_turn:
+        your_turn_range = _section_y_range(
+            nodes,
+            start_label="your turn",
+            end_labels=("their turn", "hidden", "hidden matches"),
+        )
     conversations: List[ConversationPreview] = []
 
     for node in nodes:
@@ -95,6 +130,19 @@ def list_match_conversations(
         # Banner / empty-state rows sometimes look clickable.
         if "waiting for your reply" in joined or "end chats" in joined:
             continue
+
+        row_y = node.bounds[1]
+        if only_your_turn:
+            if your_turn_range is None:
+                # Header scrolled off — keep rows that still look like Your Turn.
+                if "reply?" not in joined and "start the chat" not in joined:
+                    continue
+            else:
+                start_y, end_y = your_turn_range
+                if row_y < start_y:
+                    continue
+                if end_y is not None and row_y >= end_y:
+                    continue
 
         preview = texts[1].strip() if len(texts) > 1 else ""
         is_new = any("start the chat" in t.lower() for t in texts) or any(
@@ -124,8 +172,8 @@ def list_match_conversations(
 
 
 def list_your_turn_conversations(device) -> List[ConversationPreview]:
-    """Backward-compatible alias for Matches list parsing."""
-    return list_match_conversations(device, skip_new_matches=False)
+    """List only conversations under the Your Turn section."""
+    return list_match_conversations(device, skip_new_matches=False, only_your_turn=True)
 
 
 def _message_key(sender: str, text: str) -> str:
