@@ -87,6 +87,20 @@ class ScreenContextTest(unittest.TestCase):
         ctx = classify_hinge_screen(nodes, 2800)
         self.assertEqual(ctx.kind, SCREEN_MATCHES_LIST)
 
+    def test_matches_list_not_confused_by_bottom_nav_labels(self):
+        """Bottom nav always exposes Discover/Standouts/… while Matches is open."""
+        nodes = [
+            _node(text="Matches", bounds=(40, 200, 300, 280)),
+            _node(text="Your turn (12)", bounds=(40, 662, 400, 740)),
+            _node(desc="Discover", bounds=(40, 2512, 200, 2700)),
+            _node(desc="Standouts", bounds=(220, 2512, 400, 2700)),
+            _node(desc="Likes You, 4 new likes", bounds=(420, 2512, 700, 2700)),
+            _node(desc="Matches, 12 new messages", bounds=(720, 2512, 980, 2700)),
+            _node(desc="Profile Hub", bounds=(1000, 2512, 1200, 2700)),
+        ]
+        ctx = classify_hinge_screen(nodes, 2800)
+        self.assertEqual(ctx.kind, SCREEN_MATCHES_LIST)
+
     def test_match_chat_tabs(self):
         nodes = [
             _node(text="Luana", bounds=(500, 160, 700, 240)),

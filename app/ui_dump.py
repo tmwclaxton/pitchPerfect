@@ -362,15 +362,31 @@ def active_bottom_nav_kind(nodes: List[UiNode], height: int) -> Optional[str]:
     return None
 
 
+def _matches_list_headers_visible(nodes: List[UiNode]) -> bool:
+    for node in nodes:
+        text = (node.text or "").strip().lower()
+        if text.startswith("your turn") or text.startswith("their turn"):
+            return True
+        if text.startswith("hidden"):
+            return True
+    return False
+
+
 def _looks_like_discover_feed(nodes: List[UiNode], height: int) -> Optional[str]:
     """
     Detect Discover / Standouts / Likes You / Explore when Chat/Profile chrome
     for a match conversation is missing.
+
+    Important: bottom-nav labels (Discover/Standouts/Matches/…) are always in the
+    dump — mere presence must NOT mean we left Matches.
     """
     if chat_profile_tabs_visible(nodes):
         return None
+    # Matches list section headers beat feed heuristics.
+    if _matches_list_headers_visible(nodes):
+        return None
 
-    # Explicit bottom-nav selection wins.
+    # Only trust an explicitly selected feed tab.
     nav_kind = active_bottom_nav_kind(nodes, height)
     if nav_kind in {
         SCREEN_DISCOVER,
@@ -379,32 +395,26 @@ def _looks_like_discover_feed(nodes: List[UiNode], height: int) -> Optional[str]
     }:
         return nav_kind
 
-    blob_parts = []
+    # Without selected=, require feed chrome that Matches list never shows:
+    # e.g. standalone top "Standouts"/"Discover" title and no Matches header.
+    top_titles = []
     for node in nodes:
-        if node.text:
-            blob_parts.append(node.text.lower())
-        if node.content_desc:
-            blob_parts.append(node.content_desc.lower())
-    blob = " | ".join(blob_parts)
-
-    for key, kind in _FEED_NAV_LABELS:
-        # Top-of-app feed titles / selected nav labels.
-        if re.search(rf"\b{re.escape(key)}\b", blob):
-            # Avoid false positives from Matches empty-state copy mentioning Discover.
-            if kind != SCREEN_DISCOVER or "your turn" not in blob:
-                # Require bottom-nav-ish placement OR no Matches list headers.
-                nav_like = any(
-                    key in ((n.content_desc or n.text) or "").lower()
-                    and n.bounds[1] > int(height * 0.86)
-                    for n in nodes
-                )
-                has_section = any(
-                    (n.text or "").strip().lower().startswith(prefix)
-                    for n in nodes
-                    for prefix in ("your turn", "their turn", "hidden")
-                )
-                if nav_like or (not has_section and "matches" not in blob[:200]):
-                    return kind
+        if node.bounds[1] > int(height * 0.25):
+            continue
+        label = ((node.text or node.content_desc) or "").strip().lower()
+        if not label:
+            continue
+        for key, kind in _FEED_NAV_LABELS:
+            if label == key or label.startswith(key + ","):
+                top_titles.append(kind)
+    has_matches_title = any(
+        ((n.text or n.content_desc) or "").strip().lower() in {"matches", "matches,"}
+        or ((n.text or "").strip().lower().startswith("matches"))
+        for n in nodes
+        if n.bounds[1] < int(height * 0.25)
+    )
+    if top_titles and not has_matches_title:
+        return top_titles[0]
     return None
 
 
@@ -499,17 +509,14 @@ def classify_hinge_screen(
             detail="match conversation Chat tab",
         )
 
+    # Matches list markers before feed detection — bottom nav always lists
+    # Discover/Standouts/Likes You even while Matches is open.
+    if _matches_list_headers_visible(nodes):
+        return ScreenContext(SCREEN_MATCHES_LIST, detail="section header visible")
+
     feed = _looks_like_discover_feed(nodes, height)
     if feed:
         return ScreenContext(feed, detail="feed/nav without match chat chrome")
-
-    # Matches list markers.
-    for node in nodes:
-        text = (node.text or "").strip().lower()
-        if text.startswith("your turn") or text.startswith("their turn"):
-            return ScreenContext(SCREEN_MATCHES_LIST, detail="section header visible")
-        if text.startswith("hidden"):
-            return ScreenContext(SCREEN_MATCHES_LIST, detail="hidden section visible")
 
     if in_match_conversation(nodes):
         shown = (expect_match or "").strip() or None
@@ -529,6 +536,14 @@ def classify_hinge_screen(
         return ScreenContext(SCREEN_MATCHES_LIST, detail="bottom nav Matches")
     if nav_kind in {SCREEN_DISCOVER, SCREEN_STANDOUTS, SCREEN_LIKES_YOU}:
         return ScreenContext(nav_kind, detail="bottom nav feed tab")
+
+    # Top "Matches" title without section headers (scrolled mid-list).
+    for node in nodes:
+        if node.bounds[1] > int(height * 0.25):
+            continue
+        label = ((node.text or node.content_desc) or "").strip().lower()
+        if label == "matches" or label.startswith("matches,"):
+            return ScreenContext(SCREEN_MATCHES_LIST, detail="Matches title visible")
 
     return ScreenContext(SCREEN_UNKNOWN, detail="unrecognized hinge screen")
 
@@ -715,18 +730,17 @@ def open_matches(
             continue
         break
 
-    nodes = parse_ui_nodes(xml_text)
-    if matches_list_visible(nodes, height):
-        time.sleep(max(0.2, float(settle_s) * 0.4))
-        return
-
-    matches = find_nodes(nodes, desc_contains="Matches")
-    # Prefer bottom-nav Matches over any in-content control with similar desc.
-    nav_matches = [node for node in matches if node.bounds[1] > int(height * 0.88)]
-    target = (nav_matches or matches or [None])[0]
-    if target:
-        tap_bounds(device, target.bounds)
-    else:
+    def _tap_matches_nav(local_nodes: List[UiNode]) -> bool:
+        matches = find_nodes(local_nodes, desc_contains="Matches")
+        # Prefer bottom-nav Matches over any in-content control with similar desc.
+        # Use 0.82 — Hinge nav sits slightly above the absolute bottom on some devices.
+        nav_matches = [
+            node for node in matches if node.bounds[1] > int(height * 0.82)
+        ]
+        target = (nav_matches or matches or [None])[0]
+        if target:
+            tap_bounds(device, target.bounds)
+            return True
         # Fallback: 4th of 5 bottom-nav slots — only safe inside Hinge.
         tap_bounds(
             device,
@@ -737,23 +751,29 @@ def open_matches(
                 int(height * 0.99),
             ),
         )
+        return True
+
+    nodes = parse_ui_nodes(xml_text)
+    ctx = classify_hinge_screen(nodes, height, xml_text=xml_text)
+    if ctx.is_matches_list or matches_list_visible(nodes, height):
+        time.sleep(max(0.2, float(settle_s) * 0.4))
+        return
+
+    _tap_matches_nav(nodes)
     time.sleep(max(0.35, float(settle_s)))
 
-    # If still in a thread, one more Back + Matches tap.
+    # If still in a thread or feed, Back (when in thread) + Matches tap again.
     xml_text = dump_ui_xml(device)
     nodes = parse_ui_nodes(xml_text)
+    ctx = classify_hinge_screen(nodes, height, xml_text=xml_text)
+    if ctx.is_matches_list or matches_list_visible(nodes, height):
+        return
     if in_match_conversation(nodes):
         press_back(device, settle_s=0.45)
         xml_text = dump_ui_xml(device)
         nodes = parse_ui_nodes(xml_text)
-        nav_matches = [
-            node
-            for node in find_nodes(nodes, desc_contains="Matches")
-            if node.bounds[1] > int(height * 0.88)
-        ]
-        if nav_matches:
-            tap_bounds(device, nav_matches[0].bounds)
-            time.sleep(max(0.35, float(settle_s)))
+    _tap_matches_nav(nodes)
+    time.sleep(max(0.35, float(settle_s)))
 
 
 def press_back(device, *, settle_s: float = 0.55) -> None:
