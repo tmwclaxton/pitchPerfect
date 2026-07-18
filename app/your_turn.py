@@ -1,0 +1,402 @@
+# app/your_turn.py
+"""List Hinge Your Turn chats and collect full conversation history."""
+
+from __future__ import annotations
+
+import re
+import time
+from dataclasses import dataclass, field
+from typing import List, Optional, Set, Tuple
+
+from ui_dump import (
+    Bounds,
+    MESSAGE_DESC_RE,
+    bounds_center,
+    dump_ui_xml,
+    find_nodes,
+    open_matches,
+    parse_ui_nodes,
+    press_back,
+    swipe,
+    tap_bounds,
+)
+
+
+@dataclass
+class ConversationPreview:
+    name: str
+    preview: str
+    bounds: Bounds
+    is_new_match: bool = False
+
+
+@dataclass
+class ChatMessage:
+    sender: str  # "You" or their name
+    text: str
+    timestamp: Optional[str] = None
+
+
+@dataclass
+class ConversationHistory:
+    name: str
+    messages: List[ChatMessage] = field(default_factory=list)
+    is_new_match: bool = False
+
+    def as_transcript(self) -> str:
+        if not self.messages:
+            return "(No messages yet — this is a new match.)"
+        lines = []
+        for message in self.messages:
+            stamp = f" [{message.timestamp}]" if message.timestamp else ""
+            lines.append(f"{message.sender}{stamp}: {message.text}")
+        return "\n".join(lines)
+
+
+def your_turn_count(device) -> Optional[int]:
+    """Parse 'Your turn (N)' from the Matches list, if present."""
+    nodes = parse_ui_nodes(dump_ui_xml(device))
+    for node in nodes:
+        for text in [node.text, *node.children_text]:
+            match = re.search(r"your turn\s*\((\d+)\)", text, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def list_match_conversations(
+    device,
+    *,
+    skip_new_matches: bool = False,
+) -> List[ConversationPreview]:
+    """List visible Matches-tab conversations (Your Turn and beyond)."""
+    nodes = parse_ui_nodes(dump_ui_xml(device))
+    conversations: List[ConversationPreview] = []
+
+    for node in nodes:
+        if not node.clickable:
+            continue
+        texts = [t for t in node.children_text if t]
+        if not texts:
+            continue
+        # Skip section headers / banners.
+        joined = " ".join(texts).lower()
+        if "your turn" in joined or "their turn" in joined or "over the limit" in joined:
+            continue
+        if any(
+            nav in (node.content_desc or "").lower()
+            for nav in ("discover", "standouts", "likes you", "matches")
+        ):
+            continue
+
+        name = texts[0].strip()
+        if not name or name.lower() in {"matches", "start chat"}:
+            continue
+        # Banner / empty-state rows sometimes look clickable.
+        if "waiting for your reply" in joined or "end chats" in joined:
+            continue
+
+        preview = texts[1].strip() if len(texts) > 1 else ""
+        is_new = any("start the chat" in t.lower() for t in texts) or any(
+            t.lower() == "start chat" for t in texts
+        )
+        if skip_new_matches and is_new:
+            continue
+        conversations.append(
+            ConversationPreview(
+                name=name,
+                preview=preview,
+                bounds=node.bounds,
+                is_new_match=is_new,
+            )
+        )
+
+    # Deduplicate by name keeping first (topmost) occurrence.
+    seen: Set[str] = set()
+    unique: List[ConversationPreview] = []
+    for conversation in conversations:
+        key = conversation.name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(conversation)
+    return unique
+
+
+def list_your_turn_conversations(device) -> List[ConversationPreview]:
+    """Backward-compatible alias for Matches list parsing."""
+    return list_match_conversations(device, skip_new_matches=False)
+
+
+def _message_key(sender: str, text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text).strip().lower()
+    # Hinge appends "You liked this message." — keep it for identity.
+    return f"{sender.lower()}::{normalized}"
+
+
+def _parse_messages_from_nodes(nodes) -> Tuple[List[ChatMessage], List[str]]:
+    """Return messages (top-to-bottom) and timestamp labels aligned by Y order."""
+    timed_nodes = []
+    for node in nodes:
+        if re.match(
+            r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Yesterday|Today)\b",
+            node.text,
+        ) or re.match(r"^\d", node.text):
+            if node.text and not node.content_desc:
+                timed_nodes.append(("time", node.bounds[1], node.text))
+                continue
+
+        match = MESSAGE_DESC_RE.match(node.content_desc or "")
+        if match:
+            sender = match.group(1).strip()
+            text = match.group(2).strip()
+            text = re.sub(
+                r"\s*You liked this message\.?\s*$",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            ).strip()
+            if text:
+                timed_nodes.append(("msg", node.bounds[1], sender, text))
+            continue
+
+        # Profile like / prompt like rows show as plain text, not message descs.
+        if node.text and re.match(
+            r"^You liked .+\.?$",
+            node.text.strip(),
+            re.IGNORECASE,
+        ):
+            timed_nodes.append(("msg", node.bounds[1], "You", node.text.strip()))
+
+    timed_nodes.sort(key=lambda item: item[1])
+
+    messages: List[ChatMessage] = []
+    last_timestamp: Optional[str] = None
+    for item in timed_nodes:
+        if item[0] == "time":
+            last_timestamp = item[2]
+            continue
+        _, _, sender, text = item
+        messages.append(
+            ChatMessage(sender=sender, text=text, timestamp=last_timestamp)
+        )
+    return messages, []
+
+
+def collect_chat_history(
+    device,
+    width: int,
+    height: int,
+    name: str,
+    *,
+    max_scrolls: int = 12,
+    stagnant_limit: int = 2,
+) -> ConversationHistory:
+    """Scroll upward through a chat and reconstruct oldest→newest history."""
+    ordered: List[ChatMessage] = []
+    seen: Set[str] = set()
+    stagnant = 0
+
+    def ingest_screen() -> int:
+        nonlocal ordered
+        nodes = parse_ui_nodes(dump_ui_xml(device))
+        on_screen, _ = _parse_messages_from_nodes(nodes)
+        new_messages = []
+        for message in on_screen:
+            key = _message_key(message.sender, message.text)
+            if key in seen:
+                continue
+            seen.add(key)
+            new_messages.append(message)
+        if not new_messages:
+            return 0
+        # When scrolling up, newly revealed messages are older → prepend.
+        ordered = new_messages + ordered
+        return len(new_messages)
+
+    # Current viewport first (newer messages near bottom).
+    ingest_screen()
+
+    for _ in range(max_scrolls):
+        # Finger moves down → older history appears at the top.
+        swipe(
+            device,
+            width // 2,
+            int(height * 0.35),
+            width // 2,
+            int(height * 0.75),
+            350,
+        )
+        time.sleep(1.2)
+        added = ingest_screen()
+        if added == 0:
+            stagnant += 1
+            if stagnant >= stagnant_limit:
+                break
+        else:
+            stagnant = 0
+
+    # Scroll back to the latest messages so the composer is usable.
+    for _ in range(3):
+        swipe(
+            device,
+            width // 2,
+            int(height * 0.75),
+            width // 2,
+            int(height * 0.35),
+            300,
+        )
+        time.sleep(0.6)
+
+    return ConversationHistory(name=name, messages=ordered)
+
+
+def open_conversation(device, conversation: ConversationPreview) -> None:
+    tap_bounds(device, conversation.bounds)
+    time.sleep(2.5)
+
+
+def _composer_text(device) -> str:
+    nodes = parse_ui_nodes(dump_ui_xml(device))
+    composers = find_nodes(
+        nodes,
+        resource_id="co.hinge.app:id/messageComposition",
+    )
+    if not composers:
+        return ""
+    text = composers[0].text or ""
+    # Placeholder means empty.
+    if text.strip().lower() in {"send a message", ""}:
+        return ""
+    return text
+
+
+def _clear_composer(device, bounds: Bounds) -> None:
+    """Select-all then delete so prior drafts don't linger."""
+    tap_bounds(device, bounds)
+    time.sleep(0.2)
+
+    # Ctrl+A (KEYCODE_CTRL_LEFT=113, KEYCODE_A=29), then DEL (67).
+    device.shell("input keycombination 113 29")
+    time.sleep(0.12)
+    device.shell("input keyevent 67")
+    time.sleep(0.12)
+
+    if _composer_text(device):
+        # Fallback: jump to end and backspace leftovers.
+        device.shell("input keyevent 123")  # MOVE_END
+        del_events = " ".join(["67"] * 80)
+        device.shell(f"input keyevent {del_events}")
+        time.sleep(0.15)
+
+
+def _normalize_for_adb(text: str) -> str:
+    """ASCII-normalize draft text so adb typing is reliable."""
+    if not text:
+        return ""
+    replacements = {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2026": "...",
+        "\xa0": " ",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _adb_type_text(device, text: str) -> None:
+    """Type ASCII text via adb input. Spaces become %s."""
+    safe_chars = []
+    for char in text:
+        if char == "\n":
+            if safe_chars:
+                _adb_flush_chunk(device, "".join(safe_chars))
+                safe_chars = []
+            device.shell("input keyevent 66")
+            continue
+        if ord(char) >= 128:
+            continue
+        if char.isalnum() or char in " .,!?':;-/@#_":
+            safe_chars.append(char)
+        elif char == '"':
+            continue
+        else:
+            if safe_chars:
+                _adb_flush_chunk(device, "".join(safe_chars))
+                safe_chars = []
+    if safe_chars:
+        _adb_flush_chunk(device, "".join(safe_chars))
+
+
+def _adb_flush_chunk(device, chunk: str) -> None:
+    if not chunk:
+        return
+    step = 60
+    for index in range(0, len(chunk), step):
+        part = chunk[index : index + step]
+        escaped = (
+            part.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("'", "\\'")
+            .replace(" ", "%s")
+            .replace("&", "\\&")
+            .replace("<", "\\<")
+            .replace(">", "\\>")
+            .replace("|", "\\|")
+            .replace(";", "\\;")
+            .replace("(", "\\(")
+            .replace(")", "\\)")
+        )
+        device.shell(f'input text "{escaped}"')
+        time.sleep(0.05)
+
+
+def focus_composer_and_type(device, text: str) -> bool:
+    """Paste a draft into the Hinge composer without sending."""
+    text = _normalize_for_adb(text)
+    if not text:
+        return False
+
+    nodes = parse_ui_nodes(dump_ui_xml(device))
+    composers = find_nodes(
+        nodes,
+        resource_id="co.hinge.app:id/messageComposition",
+    )
+    if not composers:
+        composers = [
+            node
+            for node in find_nodes(nodes, text_contains="Send a message")
+            if node.class_name == "EditText" or node.editable
+        ]
+    if not composers:
+        return False
+
+    _clear_composer(device, composers[0].bounds)
+    tap_bounds(device, composers[0].bounds)
+    time.sleep(0.15)
+    _adb_type_text(device, text)
+    time.sleep(0.25)
+    return True
+
+
+def ensure_matches_your_turn(device, width: int, height: int) -> None:
+    open_matches(device, width, height)
+    nodes = parse_ui_nodes(dump_ui_xml(device))
+    headers = find_nodes(nodes, text_contains="Your turn")
+    if not headers:
+        # Try scrolling the matches list to the top.
+        swipe(
+            device,
+            width // 2,
+            int(height * 0.35),
+            width // 2,
+            int(height * 0.8),
+            300,
+        )
+        time.sleep(1)
