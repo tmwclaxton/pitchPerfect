@@ -70,7 +70,7 @@ By integrating these components, the script can make automated decisions (like o
    ```env
    NANOGPT_API_KEY=your-api-key
    NANOGPT_BASE_URL=https://nano-gpt.com/api/v1
-   NANOGPT_MODEL=openai/gpt-4.1-mini
+   NANOGPT_MODEL=deepseek/deepseek-v4-flash:throughput
    ```
 
 2. **Install deps** (host / recommended for USB adb on macOS):

@@ -6,7 +6,10 @@ load_dotenv()
 
 NANOGPT_API_KEY = os.getenv("NANOGPT_API_KEY")
 NANOGPT_BASE_URL = os.getenv("NANOGPT_BASE_URL", "https://nano-gpt.com/api/v1")
-NANOGPT_MODEL = os.getenv("NANOGPT_MODEL", "openai/gpt-4.1-mini")
+# Match AutoCVApply's fast NanoGPT route (deepseek flash :throughput).
+NANOGPT_MODEL = os.getenv(
+    "NANOGPT_MODEL", "deepseek/deepseek-v4-flash:throughput"
+)
 NANOGPT_VISION_MODEL = os.getenv(
     "NANOGPT_VISION_MODEL", "openai/gpt-4.1-mini:speed"
 )

@@ -48,10 +48,30 @@ def contact_already_exchanged(history: ConversationHistory) -> bool:
     )
 
 
+def _real_message_count(history: ConversationHistory) -> Tuple[int, int, int]:
+    """Count non-chrome messages: total, theirs, yours."""
+    their = 0
+    yours = 0
+    for message in history.messages:
+        text = (message.text or "").strip()
+        if not text:
+            continue
+        if re.match(r"^you liked\b", text, re.I):
+            continue
+        if message.sender.lower() == "you":
+            yours += 1
+        else:
+            their += 1
+    return their + yours, their, yours
+
+
 def contact_stage(history: ConversationHistory) -> Tuple[str, str]:
     """
     Return (stage, guidance).
     stages: too_early | maybe | good | already_done
+
+    Prefer IG after ~5-6 real messages once there is rapport. WhatsApp is fine
+    as a natural alternative. Never force contact on cold / opener threads.
     """
     if history.is_new_match or not history.messages:
         return "too_early", "Do NOT ask for Instagram or WhatsApp yet."
@@ -59,9 +79,12 @@ def contact_stage(history: ConversationHistory) -> Tuple[str, str]:
     if contact_already_exchanged(history):
         return "already_done", "Contact already mentioned — do not ask again."
 
-    turns = len(history.messages)
-    their_msgs = [m for m in history.messages if m.sender.lower() != "you"]
-    you_msgs = [m for m in history.messages if m.sender.lower() == "you"]
+    turns, their_msgs, you_msgs = _real_message_count(history)
+    # Need a real back-and-forth before contact (~5-6 messages in thread).
+    if turns < 5 or their_msgs < 2 or you_msgs < 2:
+        return "too_early", "Do NOT ask for Instagram or WhatsApp yet."
+
+    rapport = their_msgs >= 2 and you_msgs >= 2 and turns >= 5
     planish = plan_is_stalled(history) or any(
         re.search(
             r"\b(drink|coffee|pint|tonight|tomorrow|meet|free)\b",
@@ -69,24 +92,26 @@ def contact_stage(history: ConversationHistory) -> Tuple[str, str]:
             re.I,
         )
         for m in history.messages
+        if m.sender.lower() == "you"
+        and not re.match(r"^you liked\b", (m.text or "").strip(), re.I)
     )
 
-    if turns < 4 or len(their_msgs) < 2:
-        return "too_early", "Do NOT ask for Instagram or WhatsApp yet."
-
-    if planish and len(you_msgs) >= 2 and len(their_msgs) >= 2:
+    if rapport and turns >= 6 and (planish or their_msgs >= 3):
         return (
             "good",
-            "Prefer lightly steering to Instagram or WhatsApp in this reply "
-            "(e.g. 'easier on whatsapp' / 'whats your ig') if it fits in one "
-            "short line after answering them. Keep it casual, not pushy.",
+            "Rapport exists (~6+ messages). Prefer lightly asking for Instagram "
+            "if it fits after answering them (e.g. 'whats your ig'). WhatsApp "
+            "is fine as a natural alternative. One short clause max, not pushy. "
+            "If the thread is still about something specific they said, answer "
+            "that first and only add contact if it feels natural.",
         )
 
-    if turns >= 8 and len(their_msgs) >= 3:
+    if rapport and turns >= 5:
         return (
             "maybe",
-            "Good window to float IG/WhatsApp if it feels natural after "
-            "answering them; otherwise skip contact and keep the chat moving.",
+            "Thread has some rapport. You may float Instagram (or WhatsApp) "
+            "only if it feels natural after answering them; otherwise skip "
+            "contact and keep building on what they said.",
         )
 
     return "too_early", "Do NOT ask for Instagram or WhatsApp yet."

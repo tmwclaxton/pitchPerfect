@@ -21,12 +21,19 @@ import uuid
 from dotenv import load_dotenv
 
 from config import (
+    NANOGPT_MODEL,
     STYLE_INIT_MAX_CHATS,
     YOUR_TURN_MAX_CHATS,
     YOUR_TURN_PASTE_DRAFTS,
 )
 from data_store import store_draft_reply
-from db import finish_run, pasted_draft_match_names, start_run, store_conversation
+from db import (
+    finish_run,
+    list_recent_drafts,
+    pasted_draft_match_names,
+    start_run,
+    store_conversation,
+)
 from device_lock import acquire_device_lock
 from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
 from reply_drafter import draft_scored_reply
@@ -237,7 +244,13 @@ def _scroll_matches_to_your_turn(device, width: int, height: int) -> None:
     ensure_matches_your_turn(device, width, height, seek_top=True)
 
 
-def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
+def run(
+    max_chats: int,
+    paste: bool,
+    process_all: bool = False,
+    *,
+    force: bool = False,
+) -> None:
     device, width, height = _connect()
     if not device:
         return
@@ -247,6 +260,7 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
 
     max_stagnant = STAGNANT_PAGE_LIMIT if process_all else 3
     counted = None
+    print(f"NanoGPT model: {NANOGPT_MODEL}")
     if process_all:
         counted = your_turn_count(device)
         max_chats = counted if counted is not None else ALL_CHATS_FALLBACK_LIMIT
@@ -263,9 +277,17 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
     )
     # Already-pasted names skip re-draft. Do not seed seen_names with them —
     # that stagnant-exits before scrolling to unhandled rows further down.
-    already_pasted = pasted_draft_match_names()
-    if already_pasted:
+    already_pasted = set() if force else pasted_draft_match_names()
+    if force:
+        print("Force mode: re-drafting even if already pasted.")
+    elif already_pasted:
         print(f"Skipping {len(already_pasted)} already-pasted match(es).")
+    # Anti-sameness: avoid repeating recent plan lines across matches.
+    recent_draft_texts = [
+        str(row.get("draft_reply") or "")
+        for row in list_recent_drafts(30)
+        if (row.get("draft_reply") or "").strip()
+    ]
     seen_names: set[str] = set()
     drafted_names: set[str] = set()
     skipped_pasted = 0
@@ -352,7 +374,12 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
             )
 
             try:
-                result = draft_scored_reply(history, n_candidates=3)
+                result = draft_scored_reply(
+                    history,
+                    n_candidates=2,
+                    recent_drafts=recent_draft_texts,
+                    use_model_judge=False,
+                )
             except Exception as exception:
                 print(f"Draft failed for {conversation.name}: {exception}")
                 press_back(device, check_hinge=False)
@@ -398,6 +425,8 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
             drafted_names.add(key)
             if pasted:
                 already_pasted.add(key)
+            if reply:
+                recent_draft_texts.insert(0, reply)
 
             press_back(device, check_hinge=False)
             time.sleep(0.4)
@@ -489,6 +518,11 @@ def main() -> None:
         action="store_true",
         help="Only save drafts to SQLite.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-draft matches even if a pasted draft already exists.",
+    )
     args = parser.parse_args()
 
     if args.sync_history:
@@ -507,7 +541,12 @@ def main() -> None:
 
     paste = False if args.no_paste else args.paste
     max_chats = args.max_chats or YOUR_TURN_MAX_CHATS
-    run(max_chats=max_chats, paste=paste, process_all=args.all)
+    run(
+        max_chats=max_chats,
+        paste=paste,
+        process_all=args.all,
+        force=args.force,
+    )
 
 
 if __name__ == "__main__":

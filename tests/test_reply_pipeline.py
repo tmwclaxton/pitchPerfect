@@ -101,6 +101,25 @@ class EmDashAndScoringTest(unittest.TestCase):
         best = pick_best([{"total": 4.0, "reply": "a"}, {"total": 7.2, "reply": "b"}])
         self.assertEqual(best["reply"], "b")
 
+    def test_penalizes_invented_area_plan_and_sameness(self):
+        topical = _history(
+            "Vivi",
+            [
+                ("Vivi", "i am on my summer holiday"),
+            ],
+        )
+        generic = heuristic_scores("Marylebone tonight then?", topical)
+        on_topic = heuristic_scores("Nice, anywhere good so far?", topical)
+        self.assertLess(generic["specificity"], on_topic["specificity"])
+        self.assertLessEqual(generic["specificity"], 3.0)
+
+        same = heuristic_scores(
+            "Marylebone tonight then?",
+            topical,
+            recent_drafts=["Saturday evening Marylebone then?"],
+        )
+        self.assertGreaterEqual(same["sameness"], 0.55)
+
 
 class StyleAndDbTest(unittest.TestCase):
     def test_heuristic_style_and_prompt_block(self):

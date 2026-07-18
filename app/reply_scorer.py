@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from nanogpt_service import NanoGptService
 from your_turn import ConversationHistory
@@ -117,13 +117,64 @@ def _contact_stage_for_scoring(history: ConversationHistory) -> str:
     return contact_stage(history)[0]
 
 
-def heuristic_scores(reply: str, history: ConversationHistory) -> Dict[str, float]:
+_AREA_PLAN_RE = re.compile(
+    r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"tonight|tomorrow|this week|\d+\s*(am|pm)|"
+    r"\d{1,2}ish|"
+    r"marylebone|soho|shoreditch|mayfair|hackney|islington|"
+    r"drink|coffee|walk|pint)\b",
+    re.I,
+)
+
+
+def _transcript_blob(history: ConversationHistory) -> str:
+    return " ".join(m.text for m in history.messages).lower()
+
+
+def _token_set(text: str) -> set:
+    return {
+        tok
+        for tok in re.findall(r"[a-z0-9']+", (text or "").lower())
+        if len(tok) > 2
+    }
+
+
+_PLAN_MARKERS = {
+    "marylebone",
+    "soho",
+    "shoreditch",
+    "mayfair",
+    "tonight",
+    "tomorrow",
+    "whatsapp",
+    "instagram",
+}
+
+
+def _similarity(a: str, b: str) -> float:
+    ta, tb = _token_set(a), _token_set(b)
+    if not ta or not tb:
+        return 0.0
+    jaccard = len(ta & tb) / max(1, len(ta | tb))
+    shared_markers = ta & tb & _PLAN_MARKERS
+    if shared_markers:
+        jaccard = max(jaccard, 0.55 + 0.1 * (len(shared_markers) - 1))
+    return jaccard
+
+
+def heuristic_scores(
+    reply: str,
+    history: ConversationHistory,
+    *,
+    recent_drafts: Optional[Sequence[str]] = None,
+) -> Dict[str, float]:
     """Cheap local scores (0–10) before/alongside the model judge."""
     words = re.findall(r"\S+", reply)
     word_count = len(words)
     sentences = max(1, len(re.findall(r"[.!?]+", reply)) or (1 if reply.strip() else 0))
     their_last = _last_their_message(history)
     their_words = len(re.findall(r"\S+", their_last)) or 8
+    transcript = _transcript_blob(history)
 
     # Prefer punchy 4–12 word texts; soft-penalize overshoot.
     if word_count <= 2:
@@ -167,17 +218,28 @@ def heuristic_scores(reply: str, history: ConversationHistory) -> Dict[str, floa
 
     low_investment = max(0.0, min(10.0, low_investment))
 
-    specificity = 6.5
-    if re.search(
-        r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
-        r"tonight|tomorrow|this week|\d+\s*(am|pm)|"
-        r"\d{1,2}ish|"
-        r"marylebone|soho|shoreditch|mayfair|hackney|islington|"
-        r"drink|coffee|walk|pint)\b",
-        reply,
-        re.IGNORECASE,
-    ):
-        specificity = 9.2
+    # Specificity = concrete callback to THEIR words / this thread — not a
+    # canned neighborhood plan pasted onto every match.
+    specificity = 5.5
+    their_tokens = _token_set(their_last)
+    reply_tokens = _token_set(reply)
+    overlap = len(their_tokens & reply_tokens)
+    if overlap >= 1:
+        specificity = 7.5
+    if overlap >= 2:
+        specificity = 9.0
+
+    planish_reply = bool(_AREA_PLAN_RE.search(reply))
+    plan_in_thread = bool(_AREA_PLAN_RE.search(transcript)) and _you_suggested_plan(
+        history
+    )
+    if planish_reply and plan_in_thread:
+        specificity = max(specificity, 8.8)
+    elif planish_reply and not plan_in_thread:
+        # Generic "Marylebone tonight?" on a cold/topic thread — hard punish.
+        specificity = min(specificity, 2.5)
+        low_investment = max(0.0, low_investment - 2.5)
+
     if re.search(r"\bsometime\b|\bwhenever\b|\bhang out\b", reply, re.IGNORECASE):
         specificity = 2.5
     # Invented venue energy.
@@ -192,10 +254,21 @@ def heuristic_scores(reply: str, history: ConversationHistory) -> Dict[str, floa
     if reply.strip().endswith("?") and sentences <= 2:
         ease = 9.2
 
-    # When a plan was floated, reward short confirm/time asks.
-    if _you_suggested_plan(history) and word_count <= 12 and specificity >= 8.5:
+    # When a plan was floated IN THIS THREAD, reward short confirm/time asks.
+    if plan_in_thread and word_count <= 12 and planish_reply:
         brevity = min(10.0, brevity + 0.8)
         ease = min(10.0, ease + 0.5)
+
+    # Penalize copy-paste sameness vs recent drafts to other matches.
+    sameness = 0.0
+    for prior in recent_drafts or []:
+        sim = _similarity(reply, prior)
+        if sim >= 0.55:
+            sameness = max(sameness, sim)
+    if sameness >= 0.55:
+        specificity = min(specificity, 3.0)
+        low_investment = max(0.0, low_investment - 2.0)
+        ease = max(0.0, ease - 1.0)
 
     # Contact steering: reward only when the stage fits; punish early/pushy asks.
     contact_fit = 7.0
@@ -260,7 +333,7 @@ def heuristic_scores(reply: str, history: ConversationHistory) -> Dict[str, floa
     return {
         "brevity": round(min(10.0, max(0.0, brevity)), 2),
         "low_investment": round(low_investment, 2),
-        "specificity": round(specificity, 2),
+        "specificity": round(min(10.0, max(0.0, specificity)), 2),
         "ease_of_reply": round(ease, 2),
         "naturalness": round(max(0.0, natural), 2),
         "contact_fit": round(contact_fit, 2),
@@ -268,6 +341,7 @@ def heuristic_scores(reply: str, history: ConversationHistory) -> Dict[str, floa
         "ai_trope_hits": float(ai_hits),
         "polite_hits": float(polite_hits),
         "em_dash_count": float(em_dash_count),
+        "sameness": round(sameness, 3),
         "word_count": float(word_count),
         "sentence_count": float(sentences),
     }
@@ -346,15 +420,32 @@ def score_reply(
     history: ConversationHistory,
     *,
     service: Optional[NanoGptService] = None,
+    use_model_judge: bool = False,
+    recent_drafts: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    local = heuristic_scores(reply, history)
-    try:
-        judged = model_scores(reply, history, service=service)
-    except Exception as exception:
+    local = heuristic_scores(reply, history, recent_drafts=recent_drafts)
+    judged: Dict[str, Any]
+    if use_model_judge:
+        try:
+            judged = model_scores(reply, history, service=service)
+        except Exception as exception:
+            judged = {
+                "overall": local["low_investment"],
+                "anti_cringe": max(0.0, 10.0 - local["cringe_penalty"]),
+                "reason": f"model score failed: {exception}",
+            }
+    else:
         judged = {
-            "overall": local["low_investment"],
+            "overall": (
+                local["low_investment"] * 0.45
+                + local["specificity"] * 0.35
+                + local["naturalness"] * 0.2
+            ),
             "anti_cringe": max(0.0, 10.0 - local["cringe_penalty"]),
-            "reason": f"model score failed: {exception}",
+            "contact_fit": local.get("contact_fit", 7.0),
+            "brevity": local["brevity"],
+            "low_investment": local["low_investment"],
+            "reason": "heuristic-only",
         }
     total = aggregate_score(local, judged)
     # Hard floor for banned-soft / AI-ish replies so they almost never win.
@@ -364,6 +455,11 @@ def score_reply(
         total = min(total, 5.5)
     if local.get("ai_trope_hits", 0) >= 2 or local.get("polite_hits", 0) >= 2:
         total = min(total, 6.0)
+    if local.get("sameness", 0) >= 0.55:
+        total = min(total, 5.8)
+    # Invented plan on a thread that never discussed meeting.
+    if local["specificity"] <= 3.0 and _AREA_PLAN_RE.search(reply):
+        total = min(total, 5.5)
     return {
         "reply": reply,
         "total": total,
