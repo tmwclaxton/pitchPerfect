@@ -319,6 +319,115 @@ def match_transcript(match_id: int) -> str:
     return "\n".join(lines)
 
 
+def profile_field_content_hash(
+    field_type: str,
+    label: Optional[str],
+    text_content: str,
+) -> str:
+    normalized_text = re.sub(r"\s+", " ", (text_content or "").strip()).lower()
+    payload = (
+        f"{(field_type or '').strip().lower()}|"
+        f"{(label or '').strip().lower()}|"
+        f"{normalized_text}"
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:40]
+
+
+def upsert_profile_fields(
+    match_id: int,
+    fields: Sequence[Dict[str, Any]],
+    *,
+    scraped_at: Optional[str] = None,
+) -> Tuple[int, int]:
+    """
+    Upsert profile fields for a match (idempotent via content_hash).
+    Returns (inserted_count, total_count).
+    """
+    scraped_at = scraped_at or _utc_now()
+    inserted = 0
+    with connect() as conn:
+        for index, field in enumerate(fields):
+            field_type = str(field.get("field_type") or "other").strip() or "other"
+            label = field.get("label")
+            label_s = str(label).strip() if label else None
+            text = str(
+                field.get("text_content") or field.get("text") or field.get("body") or ""
+            ).strip()
+            if not text:
+                continue
+            content_hash = profile_field_content_hash(field_type, label_s, text)
+            raw = field.get("raw")
+            raw_json = json.dumps(raw) if raw is not None else None
+            exists = conn.execute(
+                """
+                SELECT id FROM profile_fields
+                WHERE match_id = ? AND content_hash = ?
+                """,
+                (match_id, content_hash),
+            ).fetchone()
+            if exists:
+                conn.execute(
+                    """
+                    UPDATE profile_fields SET
+                        sort_order = ?,
+                        label = COALESCE(?, label),
+                        scraped_at = ?,
+                        raw_json = COALESCE(?, raw_json)
+                    WHERE id = ?
+                    """,
+                    (index, label_s, scraped_at, raw_json, int(exists["id"])),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO profile_fields (
+                        match_id, field_type, label, text_content, sort_order,
+                        content_hash, scraped_at, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        match_id,
+                        field_type,
+                        label_s,
+                        text,
+                        index,
+                        content_hash,
+                        scraped_at,
+                        raw_json,
+                    ),
+                )
+                inserted += 1
+
+        total = conn.execute(
+            "SELECT COUNT(*) AS c FROM profile_fields WHERE match_id = ?",
+            (match_id,),
+        ).fetchone()["c"]
+        conn.execute(
+            """
+            UPDATE matches SET
+                profile_field_count = ?,
+                profile_synced_at = ?
+            WHERE id = ?
+            """,
+            (total, scraped_at, match_id),
+        )
+    return inserted, int(total)
+
+
+def load_profile_fields(match_id: int) -> List[Dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT field_type, label, text_content, sort_order, scraped_at
+            FROM profile_fields
+            WHERE match_id = ?
+            ORDER BY sort_order ASC, id ASC
+            """,
+            (match_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def sync_stats() -> Dict[str, int]:
     with connect() as conn:
         matches = conn.execute("SELECT COUNT(*) AS c FROM matches").fetchone()["c"]
@@ -326,10 +435,27 @@ def sync_stats() -> Dict[str, int]:
         with_msgs = conn.execute(
             "SELECT COUNT(*) AS c FROM matches WHERE message_count > 0"
         ).fetchone()["c"]
+        profile_fields = 0
+        with_profiles = 0
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "profile_fields" in tables:
+            profile_fields = conn.execute(
+                "SELECT COUNT(*) AS c FROM profile_fields"
+            ).fetchone()["c"]
+            with_profiles = conn.execute(
+                "SELECT COUNT(*) AS c FROM matches WHERE profile_field_count > 0"
+            ).fetchone()["c"]
     return {
         "matches": int(matches),
         "messages": int(messages),
         "matches_with_messages": int(with_msgs),
+        "profile_fields": int(profile_fields),
+        "matches_with_profiles": int(with_profiles),
     }
 
 

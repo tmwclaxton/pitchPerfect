@@ -1,11 +1,12 @@
 # app/sync_chats.py
 """
-Sync full Hinge Matches chat histories into SQLite.
+Sync full Hinge Matches chat histories + profile text into SQLite.
 
 Examples:
   python sync_chats.py
   python sync_chats.py --max-chats 5
   python sync_chats.py --skip-new
+  python sync_chats.py --skip-profile
   python migrate.py   # apply schema only
 """
 
@@ -17,8 +18,15 @@ import time
 from dotenv import load_dotenv
 
 from config import SQLITE_PATH
-from db import finish_run, start_run, sync_stats, upsert_match_history
+from db import (
+    finish_run,
+    start_run,
+    sync_stats,
+    upsert_match_history,
+    upsert_profile_fields,
+)
 from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
+from profile_scraper import collect_profile_fields, profile_fields_as_dicts
 from style_learner import messages_as_dicts
 from ui_dump import open_matches, press_back, swipe
 from your_turn import (
@@ -60,6 +68,7 @@ def run_sync(
     *,
     max_chats: int,
     skip_new: bool = False,
+    skip_profile: bool = False,
 ) -> None:
     load_dotenv()
     device = connect_device_auto()
@@ -73,16 +82,26 @@ def run_sync(
 
     run_id = start_run(
         "sync_history",
-        {"max_chats": max_chats, "skip_new": skip_new, "sqlite": SQLITE_PATH},
+        {
+            "max_chats": max_chats,
+            "skip_new": skip_new,
+            "skip_profile": skip_profile,
+            "sqlite": SQLITE_PATH,
+        },
     )
-    print(f"Syncing up to {max_chats} Matches chat(s) into {SQLITE_PATH}")
+    print(
+        f"Syncing up to {max_chats} Matches chat(s)"
+        + (" + profiles" if not skip_profile else "")
+        + f" into {SQLITE_PATH}"
+    )
 
-    processed_names = set()
+    synced_names = set()
+    seen_names = set()
     stagnant_pages = 0
-    total_inserted = 0
-    total_messages = 0
+    total_msg_inserted = 0
+    total_profile_inserted = 0
 
-    while len(processed_names) < max_chats and stagnant_pages < 4:
+    while len(synced_names) < max_chats and stagnant_pages < 4:
         conversations = list_match_conversations(
             device,
             skip_new_matches=skip_new,
@@ -91,22 +110,22 @@ def run_sync(
         page_new = 0
 
         for conversation in conversations:
-            if len(processed_names) >= max_chats:
+            if len(synced_names) >= max_chats:
                 break
             key = conversation.name.lower()
-            if key in processed_names:
+            if key in seen_names:
                 continue
+            seen_names.add(key)
             # Skip UI chrome that sometimes looks like a conversation row.
-            if key in {"profile", "local", "matches", "hinge"} or len(key) > 48:
-                processed_names.add(key)
+            if key in {"profile", "chat", "local", "matches", "hinge"} or len(key) > 48:
                 continue
 
             page_new += 1
-            processed_names.add(key)
+            synced_names.add(key)
             section = conversation.section or "unknown"
             print(
                 f"\n=== sync: {conversation.name} "
-                f"[{section}] ({len(processed_names)}/{max_chats}) ==="
+                f"[{section}] ({len(synced_names)}/{max_chats}) ==="
             )
             if conversation.preview:
                 print(f"Preview: {conversation.preview}")
@@ -125,21 +144,44 @@ def run_sync(
                 list_preview=conversation.preview or None,
                 run_id=run_id,
             )
-            total_inserted += int(result["inserted"])
-            total_messages += int(result["message_count"])
+            match_id = int(result["match_id"])
+            total_msg_inserted += int(result["inserted"])
             print(
-                f"Saved match_id={result['match_id']} "
+                f"Saved match_id={match_id} "
                 f"messages={result['message_count']} "
                 f"(+{result['inserted']} new)"
             )
             if history.messages:
-                # Short preview of ends of the thread.
                 first = history.messages[0]
                 last = history.messages[-1]
                 print(f"  first: {first.sender}: {first.text[:80]}")
                 print(f"  last:  {last.sender}: {last.text[:80]}")
             else:
                 print("  (no messages)")
+
+            if not skip_profile:
+                try:
+                    profile_fields = collect_profile_fields(
+                        device,
+                        width,
+                        height,
+                        conversation.name,
+                    )
+                    inserted, total = upsert_profile_fields(
+                        match_id,
+                        profile_fields_as_dicts(profile_fields),
+                    )
+                    total_profile_inserted += inserted
+                    print(f"  profile fields={total} (+{inserted} new)")
+                    for field in profile_fields[:8]:
+                        label = f"{field.label}: " if field.label else ""
+                        print(
+                            f"    [{field.field_type}] {label}{field.text_content[:90]}"
+                        )
+                    if len(profile_fields) > 8:
+                        print(f"    ... +{len(profile_fields) - 8} more")
+                except Exception as exception:
+                    print(f"  profile scrape failed: {exception}")
 
             press_back(device)
             time.sleep(1.0)
@@ -150,33 +192,37 @@ def run_sync(
         else:
             stagnant_pages = 0
 
-        if len(processed_names) < max_chats:
+        if len(synced_names) < max_chats:
             _scroll_matches_list(device, width, height)
 
     stats = sync_stats()
     finish_run(
         run_id,
         {
-            "chats_synced": len(processed_names),
-            "messages_inserted": total_inserted,
+            "chats_synced": len(synced_names),
+            "messages_inserted": total_msg_inserted,
+            "profile_fields_inserted": total_profile_inserted,
             "db_matches": stats["matches"],
             "db_messages": stats["messages"],
+            "db_profile_fields": stats.get("profile_fields", 0),
         },
     )
     print("\n--- sync complete ---")
-    print(f"Chats visited this run: {len(processed_names)}")
-    print(f"New message rows inserted: {total_inserted}")
+    print(f"Chats visited this run: {len(synced_names)}")
+    print(f"New message rows inserted: {total_msg_inserted}")
+    print(f"New profile field rows inserted: {total_profile_inserted}")
     print(
         f"DB totals: {stats['matches']} matches, "
-        f"{stats['messages']} messages "
-        f"({stats['matches_with_messages']} with history)"
+        f"{stats['messages']} messages, "
+        f"{stats.get('profile_fields', 0)} profile fields "
+        f"({stats.get('matches_with_profiles', 0)} with profiles)"
     )
     print(f"SQLite: {SQLITE_PATH}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Sync all Hinge Matches chat histories into SQLite."
+        description="Sync all Hinge Matches chats + profiles into SQLite."
     )
     parser.add_argument(
         "--max-chats",
@@ -189,8 +235,17 @@ def main() -> None:
         action="store_true",
         help="Skip brand-new matches with no chat yet.",
     )
+    parser.add_argument(
+        "--skip-profile",
+        action="store_true",
+        help="Only sync chat history (skip Profile tab).",
+    )
     args = parser.parse_args()
-    run_sync(max_chats=args.max_chats, skip_new=args.skip_new)
+    run_sync(
+        max_chats=args.max_chats,
+        skip_new=args.skip_new,
+        skip_profile=args.skip_profile,
+    )
 
 
 if __name__ == "__main__":

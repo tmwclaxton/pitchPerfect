@@ -82,15 +82,16 @@ By integrating these components, the script can make automated decisions (like o
 
 ## Chat history + Your Turn drafting
 
-Data lives in SQLite (`app/data/pitchperfect.db` locally, `/data/pitchperfect.db` in Docker): `matches`, `messages`, drafts, learned style, run metadata. Schema is versioned under `app/migrations/`.
+Data lives in SQLite (`app/data/pitchperfect.db` locally, `/data/pitchperfect.db` in Docker): `matches`, `messages`, `profile_fields`, drafts, learned style, run metadata. Schema is versioned under `app/migrations/`.
 
 **Host (preferred with USB):**
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 cd app
 ../.venv/bin/python migrate.py                             # apply migrations
-../.venv/bin/python sync_chats.py                          # ALL Matches chats -> SQLite
+../.venv/bin/python sync_chats.py                          # ALL Matches chats + profiles -> SQLite
 ../.venv/bin/python sync_chats.py --max-chats 5            # smoke sync
+../.venv/bin/python sync_chats.py --skip-profile           # chats only
 ../.venv/bin/python draft_replies.py --sync-history        # same as sync_chats
 ../.venv/bin/python draft_replies.py --init-style          # learn texting style
 ../.venv/bin/python draft_replies.py --max-chats 2         # smoke draft

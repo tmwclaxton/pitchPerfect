@@ -213,6 +213,10 @@ def apply_migrations(
             """
         )
 
+    if _table_exists(conn, "matches"):
+        _ensure_column(conn, "matches", "profile_field_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "matches", "profile_synced_at", "TEXT")
+
     migrated = _migrate_legacy_conversations(conn)
     if migrated:
         print(f"Migrated {migrated} legacy conversation blob(s) into matches/messages.")

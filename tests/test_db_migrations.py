@@ -30,12 +30,15 @@ class MigrationsAndUpsertTest(unittest.TestCase):
             }
             self.assertIn("matches", tables)
             self.assertIn("messages", tables)
+            self.assertIn("profile_fields", tables)
             self.assertIn("schema_migrations", tables)
             versions = [
                 row[0]
-                for row in conn.execute("SELECT version FROM schema_migrations")
+                for row in conn.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )
             ]
-            self.assertEqual(versions, [1])
+            self.assertEqual(versions, [1, 2])
             # Second run is a no-op.
             self.assertEqual(migrate_db(path), [])
             conn.close()
