@@ -77,25 +77,25 @@ def _scroll_matches_list(device, width: int, height: int) -> None:
     swipe(
         device,
         width // 2,
-        int(height * 0.75),
+        int(height * 0.78),
         width // 2,
-        int(height * 0.40),
-        320,
+        int(height * 0.35),
+        350,
     )
-    time.sleep(0.7)
+    time.sleep(0.85)
 
 
-def _scroll_matches_to_top(device, width: int, height: int, passes: int = 2) -> None:
+def _scroll_matches_to_top(device, width: int, height: int, passes: int = 3) -> None:
     for _ in range(passes):
         swipe(
             device,
             width // 2,
-            int(height * 0.35),
+            int(height * 0.32),
             width // 2,
-            int(height * 0.85),
-            260,
+            int(height * 0.88),
+            280,
         )
-        time.sleep(0.4)
+        time.sleep(0.45)
 
 
 def run_sync(
@@ -147,7 +147,7 @@ def run_sync(
     total_msg_inserted = 0
     total_profile_inserted = 0
 
-    while len(synced_names) < max_chats and stagnant_pages < 4:
+    while len(synced_names) < max_chats and stagnant_pages < 8:
         conversations = list_match_conversations(
             device,
             skip_new_matches=skip_new,
