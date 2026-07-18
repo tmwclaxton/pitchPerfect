@@ -93,7 +93,8 @@ cd app
 ../.venv/bin/python sync_chats.py --max-chats 5            # smoke sync
 ../.venv/bin/python sync_chats.py --skip-profile           # chats only
 ../.venv/bin/python draft_replies.py --sync-history        # same as sync_chats
-../.venv/bin/python draft_replies.py --init-style          # learn texting style
+../.venv/bin/python draft_replies.py --init-style --from-db  # learn style from SQLite (no phone)
+../.venv/bin/python draft_replies.py --init-style          # re-scrape Matches on device, then learn
 ../.venv/bin/python draft_replies.py --max-chats 2         # smoke draft
 ../.venv/bin/python draft_replies.py --all                 # draft all Your Turn (paste, never send)
 ../.venv/bin/python draft_replies.py --all --no-paste      # save only
@@ -104,8 +105,12 @@ cd app
 # On host: adb tcpip 5555 && adb connect PHONE_IP:5555
 # Ensure host adb server is reachable (ADB_SERVER_HOST=host.docker.internal).
 docker compose --profile tools build
-docker compose --profile tools run --rm pitchperfect python draft_replies.py --init-style
+# Named volume `pitchperfect-data` stores /data/pitchperfect.db by default.
+docker compose --profile tools run --rm pitchperfect python sync_chats.py
+# Use the same host SQLite dir as local runs:
+SQLITE_BIND=./app/data docker compose --profile tools run --rm pitchperfect \
+  python draft_replies.py --init-style --from-db
 docker compose --profile tools run --rm pitchperfect python draft_replies.py --all --no-paste
 ```
 
-Limitations: macOS USB devices are attached to the host adb server; containers cannot see them unless you forward adb (`adb -a nodaemon server`) and set `ADB_SERVER_HOST=host.docker.internal`.
+Limitations: macOS USB devices are attached to the host adb server; containers cannot see them unless you forward adb (`adb -a nodaemon server`) and set `ADB_SERVER_HOST=host.docker.internal`. Composer drafts (unsent EditText text) are ignored during sync.

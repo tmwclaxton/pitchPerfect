@@ -7,9 +7,75 @@ import re
 import statistics
 from typing import Any, Dict, List, Optional
 
-from db import load_style_profile, save_style_profile
+from db import list_matches, load_match_messages, load_style_profile, save_style_profile
 from nanogpt_service import NanoGptService
 from your_turn import ChatMessage, ConversationHistory
+
+
+def _is_junk_match_name(name: str) -> bool:
+    """Reject chrome / composer-draft rows accidentally stored as matches."""
+    cleaned = (name or "").strip()
+    if not cleaned or len(cleaned) > 48:
+        return True
+    lowered = cleaned.lower()
+    if lowered in {
+        "profile",
+        "chat",
+        "local",
+        "matches",
+        "hinge",
+        "search",
+        "gt",
+        "send a message",
+    }:
+        return True
+    if lowered.startswith("gt "):
+        return True
+    # Unsent drafts / long sentences saved as "names".
+    if len(cleaned.split()) >= 5 and any(ch in cleaned for ch in ".,?!"):
+        return True
+    return False
+
+
+def histories_from_db(
+    *,
+    max_chats: int = 50,
+    min_you_messages: int = 1,
+) -> List[ConversationHistory]:
+    """
+    Load saved Matches chats from SQLite for offline style learning.
+    Prefers chats where You sent at least min_you_messages.
+    """
+    histories: List[ConversationHistory] = []
+    for match in list_matches(limit=max(max_chats * 3, 50)):
+        if len(histories) >= max_chats:
+            break
+        name = (match.get("name") or "").strip()
+        if _is_junk_match_name(name):
+            continue
+        rows = load_match_messages(int(match["id"]))
+        if not rows:
+            continue
+        messages = [
+            ChatMessage(
+                sender=row["sender"],
+                text=row["body"],
+                timestamp=row.get("timestamp_label"),
+            )
+            for row in rows
+            if (row.get("body") or "").strip()
+        ]
+        you_count = sum(1 for m in messages if m.sender.lower() == "you")
+        if you_count < min_you_messages:
+            continue
+        histories.append(
+            ConversationHistory(
+                name=name,
+                messages=messages,
+                is_new_match=bool(match.get("is_new_match")),
+            )
+        )
+    return histories
 
 STYLE_SYSTEM = """You analyze a man's Hinge texts and describe his real texting style.
 Be concrete and short. Return JSON only."""

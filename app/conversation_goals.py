@@ -77,15 +77,16 @@ def contact_stage(history: ConversationHistory) -> Tuple[str, str]:
     if planish and len(you_msgs) >= 2 and len(their_msgs) >= 2:
         return (
             "good",
-            "Optional: if it fits in one short line, lightly suggest moving to "
-            "Instagram or WhatsApp (e.g. easier to arrange). Not required.",
+            "Prefer lightly steering to Instagram or WhatsApp in this reply "
+            "(e.g. 'easier on whatsapp' / 'whats your ig') if it fits in one "
+            "short line after answering them. Keep it casual, not pushy.",
         )
 
     if turns >= 8 and len(their_msgs) >= 3:
         return (
             "maybe",
-            "Only ask for IG/WhatsApp if it feels natural after answering them; "
-            "otherwise skip contact and keep the chat moving.",
+            "Good window to float IG/WhatsApp if it feels natural after "
+            "answering them; otherwise skip contact and keep the chat moving.",
         )
 
     return "too_early", "Do NOT ask for Instagram or WhatsApp yet."

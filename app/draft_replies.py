@@ -6,6 +6,7 @@ Examples:
   python sync_chats.py                     # full Matches history -> SQLite
   python draft_replies.py --sync-history   # alias for sync_chats
   python draft_replies.py --init-style
+  python draft_replies.py --init-style --from-db   # learn style from SQLite only
   python draft_replies.py --max-chats 2
   python draft_replies.py --all
   python draft_replies.py --all --no-paste
@@ -28,7 +29,7 @@ from data_store import store_draft_reply
 from db import finish_run, start_run, store_conversation
 from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
 from reply_drafter import draft_scored_reply
-from style_learner import infer_style_profile, messages_as_dicts
+from style_learner import histories_from_db, infer_style_profile, messages_as_dicts
 from ui_dump import open_matches, press_back, swipe
 from your_turn import (
     ConversationHistory,
@@ -66,8 +67,46 @@ def _connect():
     return device, width, height
 
 
-def run_init_style(max_chats: int) -> None:
+def run_init_style_from_db(max_chats: int) -> None:
+    """Learn texting style from chats already saved in SQLite (no device)."""
+    run_id = start_run("init_style_db", {"max_chats": max_chats, "source": "sqlite"})
+    histories = histories_from_db(max_chats=max_chats, min_you_messages=1)
+    print(
+        f"Learning texting style from {len(histories)} saved chat(s) "
+        f"(cap {max_chats}) in SQLite."
+    )
+    if not histories:
+        finish_run(run_id, {"chats_seen": 0, "sample_count": 0})
+        print("No usable chats in SQLite yet — run sync_chats.py first.")
+        return
+
+    for history in histories:
+        you_n = sum(1 for m in history.messages if m.sender.lower() == "you")
+        print(f"  style sample: {history.name} ({you_n} of your messages)")
+
+    profile = infer_style_profile(histories)
+    finish_run(
+        run_id,
+        {
+            "chats_seen": len(histories),
+            "chats_with_messages": len(histories),
+            "sample_count": profile.get("message_count", 0),
+        },
+    )
+    print("\n--- learned style ---")
+    print(profile.get("summary") or profile)
+    print(
+        f"\nSaved style profile from {len(histories)} chat(s) "
+        f"({profile.get('message_count', 0)} of your messages)."
+    )
+
+
+def run_init_style(max_chats: int, *, from_db: bool = False) -> None:
     """Collect Matches chat histories and persist a learned style profile."""
+    if from_db:
+        run_init_style_from_db(max_chats)
+        return
+
     device, width, height = _connect()
     if not device:
         return
@@ -290,6 +329,11 @@ def main() -> None:
         help="Collect Matches chat histories and learn your texting style.",
     )
     parser.add_argument(
+        "--from-db",
+        action="store_true",
+        help="With --init-style: learn from SQLite only (no phone/adb).",
+    )
+    parser.add_argument(
         "--all",
         action="store_true",
         help="Process every match in Your Turn (reads the on-screen count).",
@@ -324,7 +368,7 @@ def main() -> None:
 
     if args.init_style:
         max_chats = args.max_chats or STYLE_INIT_MAX_CHATS
-        run_init_style(max_chats=max_chats)
+        run_init_style(max_chats=max_chats, from_db=args.from_db)
         return
 
     paste = False if args.no_paste else args.paste

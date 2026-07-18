@@ -81,6 +81,10 @@ class EmDashAndScoringTest(unittest.TestCase):
         )
         light = heuristic_scores("easier on whatsapp if you want", good_stage)
         self.assertGreaterEqual(light["contact_fit"], 8)
+        skip_contact = heuristic_scores("thursday after 7 then?", good_stage)
+        self.assertLess(skip_contact["contact_fit"], light["contact_fit"])
+        self.assertEqual(contact_stage(good_stage)[0], "good")
+        self.assertIn("whatsapp", contact_stage(good_stage)[1].lower())
 
     def test_aggregate_floors_em_dash_winners(self):
         local = heuristic_scores(

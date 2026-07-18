@@ -31,7 +31,7 @@ Hard rules:
 - No AI/polite filler: no "absolutely", "looking forward", "hope you're well", "feel free", "just wanted to", "let me know your thoughts".
 - No interview mode, no essay, no stacked compliments, max one "!" total, emoji only if they used one.
 - Never use em dashes. Plain ASCII only (comma, period, or hyphen).
-- Soft goal: when rapport is solid or a plan is forming, you may naturally steer toward Instagram or WhatsApp. Never pushy, never on early/new chats, never every message.
+- Soft goal: when rapport is solid or a plan is forming, lightly steer toward Instagram or WhatsApp in one short clause (e.g. "easier on whatsapp"). Never pushy, never on early/new chats, never every message.
 - Return only the reply text."""
 
 BANNED_SNIPPETS = [

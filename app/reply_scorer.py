@@ -221,8 +221,10 @@ def heuristic_scores(reply: str, history: ConversationHistory) -> Dict[str, floa
         contact_fit = 2.5
         low_investment = max(0.0, low_investment - 2.0)
     elif stage == "good" and not asks_contact:
-        # Fine to skip contact even when the window is open.
-        contact_fit = 7.5
+        # Prefer a light IG/WhatsApp steer when the window is open.
+        contact_fit = 6.2
+    elif stage == "maybe" and not asks_contact:
+        contact_fit = 7.0
 
     cringe_risk = 10.0 - low_investment  # high = bad; invert later in aggregate
     natural = 8.5
