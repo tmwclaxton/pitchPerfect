@@ -132,11 +132,13 @@ def list_match_conversations(
     *,
     skip_new_matches: bool = False,
     only_your_turn: bool = False,
+    xml_text: Optional[str] = None,
 ) -> List[ConversationPreview]:
     """List visible Matches-tab conversations (Your Turn and/or beyond)."""
     from ui_dump import in_match_conversation
 
-    xml_text = dump_ui_xml(device)
+    if xml_text is None:
+        xml_text = dump_ui_xml(device)
     if not is_hinge_xml(xml_text):
         print("Matches list skipped: not in Hinge")
         return []
@@ -518,12 +520,20 @@ def conversation_row_tappable(
     return content_tap_point(conversation.bounds, height) is not None
 
 
-def conversation_open_for_match(device, match_name: str, *, height: int = 2800) -> bool:
+def conversation_open_for_match(
+    device,
+    match_name: str,
+    *,
+    height: int = 2800,
+    xml_text: Optional[str] = None,
+) -> bool:
     """
     True when the open screen looks like this match's chat/profile
     (header name + chat chrome), not Matches list / Discover / another thread.
+    Pass xml_text to reuse a dump already taken for classify.
     """
-    xml_text = dump_ui_xml(device)
+    if xml_text is None:
+        xml_text = dump_ui_xml(device)
     if not is_hinge_xml(xml_text):
         return False
     nodes = parse_ui_nodes(xml_text)

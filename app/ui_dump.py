@@ -603,8 +603,11 @@ def classify_device_screen(
     height: int,
     *,
     expect_match: Optional[str] = None,
+    xml_text: Optional[str] = None,
 ) -> ScreenContext:
-    xml_text = dump_ui_xml(device)
+    """Classify the current screen. Pass xml_text to skip a fresh dump."""
+    if xml_text is None:
+        xml_text = dump_ui_xml(device)
     nodes = parse_ui_nodes(xml_text) if is_hinge_xml(xml_text) else []
     if not is_hinge_xml(xml_text):
         return classify_hinge_screen([], height, xml_text=xml_text)
@@ -660,12 +663,14 @@ def recover_to_matches(
     height: int,
     *,
     reason: str,
-    max_backs: int = 4,
+    max_backs: int = 2,
     lost: bool = True,
+    xml_text: Optional[str] = None,
 ) -> bool:
     """
     Abort off-context scrolling: Back out, reopen Hinge if needed, open Matches.
     Returns True when Matches list looks visible afterward.
+    Prefer max_backs=1 for bad-tap fail-fast; default is 2 (was 4).
     """
     if lost:
         print(f"LOST CONTEXT: {reason}")
@@ -674,7 +679,8 @@ def recover_to_matches(
         print(f"  returning to Matches: {reason}")
 
     for attempt in range(max_backs):
-        ctx = classify_device_screen(device, height)
+        ctx = classify_device_screen(device, height, xml_text=xml_text)
+        xml_text = None  # only reuse the first dump
         if ctx.is_matches_list:
             print(f"  recovery: already on Matches list ({ctx.detail})")
             return True

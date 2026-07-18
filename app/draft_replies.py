@@ -27,6 +27,7 @@ from config import (
 )
 from data_store import store_draft_reply
 from db import finish_run, start_run, store_conversation
+from device_lock import acquire_device_lock
 from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
 from reply_drafter import draft_scored_reply
 from style_learner import histories_from_db, infer_style_profile, messages_as_dicts
@@ -60,6 +61,7 @@ def _scroll_matches_list(device, width: int, height: int) -> None:
 
 def _connect():
     load_dotenv()
+    acquire_device_lock(owner="draft_replies")
     device = connect_device_auto()
     if not device:
         return None, None, None
@@ -149,7 +151,12 @@ def run_init_style(max_chats: int, *, from_db: bool = False) -> None:
                 f"\n=== style sample: {conversation.name} "
                 f"({len(processed_names)}/{max_chats}) ==="
             )
-            open_conversation(device, conversation)
+            if not open_conversation(
+                device, conversation, height=height
+            ):
+                print(f"  defer: {conversation.name} under bottom nav")
+                processed_names.discard(key)
+                continue
             history = collect_chat_history(
                 device, width, height, conversation.name
             )
@@ -231,11 +238,15 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
                 continue
 
             page_new += 1
-            processed_names.add(conversation.name.lower())
+            key = conversation.name.lower()
+            processed_names.add(key)
             print(f"\n=== {conversation.name} ({len(processed_names)}/{max_chats}) ===")
             print(f"Preview: {conversation.preview}")
 
-            open_conversation(device, conversation)
+            if not open_conversation(device, conversation, height=height):
+                print(f"  defer: {conversation.name} under bottom nav")
+                processed_names.discard(key)
+                continue
             history = collect_chat_history(
                 device,
                 width,

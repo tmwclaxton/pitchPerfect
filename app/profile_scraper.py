@@ -91,9 +91,11 @@ class ProfileField:
     raw: Optional[dict] = None
 
 
-def open_profile_tab(device) -> bool:
+def open_profile_tab(device, *, xml_text: Optional[str] = None) -> bool:
     """Switch from Chat to Profile inside an open match. Returns True if tapped."""
-    nodes = parse_ui_nodes(dump_ui_xml(device))
+    if xml_text is None:
+        xml_text = dump_ui_xml(device)
+    nodes = parse_ui_nodes(xml_text)
     # Prefer exact "Profile" tab label near the top of the chat header.
     candidates = [
         node

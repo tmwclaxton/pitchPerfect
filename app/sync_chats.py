@@ -34,6 +34,7 @@ from db import (
     upsert_match_history,
     upsert_profile_fields,
 )
+from device_lock import acquire_device_lock
 from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
 from profile_scraper import collect_profile_fields, profile_fields_as_dicts
 from style_learner import messages_as_dicts
@@ -125,6 +126,7 @@ def run_sync_live(
 ) -> None:
     """Legacy single-phase sync (parse + upsert inside the device loop)."""
     load_dotenv()
+    acquire_device_lock(owner="sync_chats_live")
     device = connect_device_auto()
     if not device:
         return
