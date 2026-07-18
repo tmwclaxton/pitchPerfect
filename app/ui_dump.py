@@ -7,14 +7,16 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 Bounds = Tuple[int, int, int, int]
 BOUNDS_RE = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+PACKAGE_RE = re.compile(r'package="([^"]+)"')
 MESSAGE_DESC_RE = re.compile(
     r"^\s*(You|[^:]+):\s*(.*?)\s*$",
     re.DOTALL,
 )
+HINGE_PACKAGE = "co.hinge.app"
 
 
 @dataclass
@@ -45,6 +47,37 @@ def dump_ui_xml(device, remote_path: str = "/sdcard/window_dump.xml") -> str:
     device.shell(f"uiautomator dump {remote_path}")
     # `cat` can truncate very large dumps; Hinge dumps are small enough.
     return device.shell(f"cat {remote_path}")
+
+
+def ui_packages(xml_text: str) -> Set[str]:
+    return {match.group(1) for match in PACKAGE_RE.finditer(xml_text or "")}
+
+
+def is_hinge_xml(xml_text: str) -> bool:
+    """True when the foreground dump is Hinge (not Settings/system search)."""
+    packages = ui_packages(xml_text)
+    return HINGE_PACKAGE in packages
+
+
+def ensure_hinge_foreground(device) -> bool:
+    """
+    If the phone left Hinge (e.g. Honor/Android Settings search), reopen it.
+    Returns True when Hinge is foreground after the call.
+    """
+    xml_text = dump_ui_xml(device)
+    if is_hinge_xml(xml_text):
+        return True
+    packages = ", ".join(sorted(ui_packages(xml_text))[:4]) or "unknown"
+    print(f"Left Hinge (foreground: {packages}); reopening co.hinge.app")
+    # Import lazily to avoid circular imports with helper_functions.
+    from helper_functions import open_hinge
+
+    open_hinge(device)
+    xml_text = dump_ui_xml(device)
+    ok = is_hinge_xml(xml_text)
+    if not ok:
+        print("Failed to recover Hinge foreground")
+    return ok
 
 
 def parse_ui_nodes(xml_text: str) -> List[UiNode]:
@@ -124,12 +157,17 @@ def swipe(
 
 def open_matches(device, width: int, height: int) -> None:
     """Open the Matches tab (speech-bubble nav item)."""
+    if not ensure_hinge_foreground(device):
+        return
     nodes = parse_ui_nodes(dump_ui_xml(device))
     matches = find_nodes(nodes, desc_contains="Matches")
-    if matches:
-        tap_bounds(device, matches[0].bounds)
+    # Prefer bottom-nav Matches over any in-content control with similar desc.
+    nav_matches = [node for node in matches if node.bounds[1] > int(height * 0.88)]
+    target = (nav_matches or matches or [None])[0]
+    if target:
+        tap_bounds(device, target.bounds)
     else:
-        # Fallback: 4th of 5 bottom-nav slots.
+        # Fallback: 4th of 5 bottom-nav slots — only safe inside Hinge.
         tap_bounds(
             device,
             (
@@ -143,10 +181,15 @@ def open_matches(device, width: int, height: int) -> None:
 
 
 def press_back(device) -> None:
-    nodes = parse_ui_nodes(dump_ui_xml(device))
-    back = find_nodes(nodes, desc_contains="Back", clickable=True)
-    if back:
-        tap_bounds(device, back[0].bounds)
-    else:
-        device.shell("input keyevent 4")
-    time.sleep(1.5)
+    # Prefer the system Back key. Tapping a "Back" content-desc outside Hinge
+    # (Honor Settings / search) keeps us trapped in system UI.
+    device.shell("input keyevent 4")
+    time.sleep(1.0)
+    xml_text = dump_ui_xml(device)
+    if is_hinge_xml(xml_text):
+        return
+    # Still off-app: one more Back, then force Hinge open.
+    device.shell("input keyevent 4")
+    time.sleep(0.8)
+    if not is_hinge_xml(dump_ui_xml(device)):
+        ensure_hinge_foreground(device)

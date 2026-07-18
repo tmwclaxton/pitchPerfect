@@ -8,13 +8,22 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
 
-from ui_dump import dump_ui_xml, find_nodes, parse_ui_nodes, swipe, tap_bounds
+from ui_dump import (
+    dump_ui_xml,
+    find_nodes,
+    is_hinge_xml,
+    parse_ui_nodes,
+    swipe,
+    tap_bounds,
+)
 
 PROMPT_RE = re.compile(
     r"^Prompt:\s*(.+?)\s+Answer:\s*(.+)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 PHOTO_RE = re.compile(r"^(.+?)['’]s photo\s*$", re.IGNORECASE)
+# Honor Settings / Google TV accessibility spam: "GT GT GT ... Google TV"
+GT_SPAM_RE = re.compile(r"^(?:GT\s*){2,}", re.IGNORECASE)
 
 # Known Hinge "basics" / attribute labels (content-desc on the row).
 BASIC_LABELS = {
@@ -57,6 +66,15 @@ CHROME_TEXT = {
     "record voice note",
     "send message",
     "verified",
+    # Android / Honor Settings + system search (wrong-screen scrapes).
+    "local",
+    "general",
+    "web",
+    "app",
+    "settings",
+    "google tv",
+    "default volume button control",
+    "media|ringtone|",
 }
 
 
@@ -111,6 +129,13 @@ def _is_chrome(text: str, match_name: str) -> bool:
     if match_name and lowered == match_name.strip().lower():
         return True
     if lowered.startswith("send a message"):
+        return True
+    if GT_SPAM_RE.match(text.strip()):
+        return True
+    if "google tv" in lowered or lowered.startswith("gt gt"):
+        return True
+    # System settings crumbs often look like "Media|Ringtone|" rows.
+    if "|" in lowered and len(lowered) < 40:
         return True
     return False
 
@@ -257,11 +282,29 @@ def collect_profile_fields(
     Open Profile tab (if needed), scroll through the profile, return all fields.
     Caller should already be inside the match conversation.
     """
-    open_profile_tab(device)
-    nodes = parse_ui_nodes(dump_ui_xml(device))
+    xml_text = dump_ui_xml(device)
+    if not is_hinge_xml(xml_text):
+        print("  profile scrape skipped: not in Hinge")
+        return []
+
+    opened = open_profile_tab(device)
+    xml_text = dump_ui_xml(device)
+    if not is_hinge_xml(xml_text):
+        print("  profile scrape skipped: left Hinge opening Profile tab")
+        return []
+    nodes = parse_ui_nodes(xml_text)
     if not _profile_tab_active(nodes):
         # Retry once — sometimes the first tap hits Chat chrome.
-        open_profile_tab(device)
+        if opened:
+            open_profile_tab(device)
+        xml_text = dump_ui_xml(device)
+        if not is_hinge_xml(xml_text):
+            print("  profile scrape skipped: left Hinge after Profile retry")
+            return []
+        nodes = parse_ui_nodes(xml_text)
+        if not _profile_tab_active(nodes):
+            print("  profile scrape skipped: Profile tab not active")
+            return []
 
     # Nudge to top of profile content.
     for _ in range(2):
@@ -279,8 +322,15 @@ def collect_profile_fields(
     seen: Set[str] = set()
     stagnant = 0
 
-    def ingest() -> int:
-        nodes = parse_ui_nodes(dump_ui_xml(device))
+    def ingest() -> Optional[int]:
+        xml_text = dump_ui_xml(device)
+        if not is_hinge_xml(xml_text):
+            print("  profile scrape abort: left Hinge while scrolling")
+            return None
+        nodes = parse_ui_nodes(xml_text)
+        # Matches-list / Settings chrome can keep producing "new" captions forever.
+        if not _profile_tab_active(nodes) and not ordered:
+            return None
         batch = extract_profile_fields_from_nodes(nodes, match_name=match_name)
         added = 0
         for field in batch:
@@ -295,7 +345,11 @@ def collect_profile_fields(
             added += 1
         return added
 
-    ingest()
+    first = ingest()
+    if first is None:
+        print("  profile scrape skipped: no Profile content visible")
+        return []
+
     for scroll_i in range(max_scrolls):
         swipe(
             device,
@@ -307,6 +361,8 @@ def collect_profile_fields(
         )
         time.sleep(1.15)
         added = ingest()
+        if added is None:
+            break
         if added == 0:
             stagnant += 1
             if scroll_i + 1 >= min_scrolls and stagnant >= stagnant_limit:

@@ -126,7 +126,13 @@ def list_match_conversations(
     only_your_turn: bool = False,
 ) -> List[ConversationPreview]:
     """List visible Matches-tab conversations (Your Turn and/or beyond)."""
-    nodes = parse_ui_nodes(dump_ui_xml(device))
+    from ui_dump import is_hinge_xml
+
+    xml_text = dump_ui_xml(device)
+    if not is_hinge_xml(xml_text):
+        print("Matches list skipped: not in Hinge")
+        return []
+    nodes = parse_ui_nodes(xml_text)
     headers = _section_headers(nodes)
     your_turn_range = None
     if only_your_turn:
@@ -164,10 +170,22 @@ def list_match_conversations(
             "hinge",
             "more",
             "back",
+            "general",
+            "web",
+            "app",
+            "settings",
+            "google tv",
+            "search",
+            "gt",
         }
         if not name or name.lower() in skip_names:
             continue
-        if len(name) > 48:
+        # Real match names are short; reject UI crumbs / drafts / "GT" spam.
+        if len(name) < 2 or len(name) > 48:
+            continue
+        if name.lower().startswith("gt ") or name.upper() == "GT":
+            continue
+        if not re.search(r"[A-Za-z]", name):
             continue
         # Composer / in-chat chrome sometimes appears if we aren't on Matches.
         if "messagecomposition" in (node.resource_id or "").lower():
@@ -176,6 +194,12 @@ def list_match_conversations(
             continue
         # Banner / empty-state rows sometimes look clickable.
         if "waiting for your reply" in joined or "end chats" in joined:
+            continue
+        # System Settings / Honor search rows (wrong screen).
+        if any(
+            crumb in joined
+            for crumb in ("google tv", "media|ringtone", "volume button", "settings")
+        ):
             continue
 
         row_y = node.bounds[1]

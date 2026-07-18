@@ -28,7 +28,7 @@ from db import (
 from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
 from profile_scraper import collect_profile_fields, profile_fields_as_dicts
 from style_learner import messages_as_dicts
-from ui_dump import open_matches, press_back, swipe
+from ui_dump import ensure_hinge_foreground, open_matches, press_back, swipe
 from your_turn import (
     collect_chat_history,
     list_match_conversations,
@@ -131,6 +131,11 @@ def run_sync(
                 print(f"Preview: {conversation.preview}")
 
             open_conversation(device, conversation)
+            if not ensure_hinge_foreground(device):
+                print("  skip: could not stay in Hinge after opening chat")
+                open_matches(device, width, height)
+                continue
+
             history = collect_chat_history(
                 device, width, height, conversation.name
             )
@@ -167,25 +172,31 @@ def run_sync(
                         height,
                         conversation.name,
                     )
-                    inserted, total = upsert_profile_fields(
-                        match_id,
-                        profile_fields_as_dicts(profile_fields),
-                    )
-                    total_profile_inserted += inserted
-                    print(f"  profile fields={total} (+{inserted} new)")
-                    for field in profile_fields[:8]:
-                        label = f"{field.label}: " if field.label else ""
-                        print(
-                            f"    [{field.field_type}] {label}{field.text_content[:90]}"
+                    if profile_fields:
+                        inserted, total = upsert_profile_fields(
+                            match_id,
+                            profile_fields_as_dicts(profile_fields),
                         )
-                    if len(profile_fields) > 8:
-                        print(f"    ... +{len(profile_fields) - 8} more")
+                        total_profile_inserted += inserted
+                        print(f"  profile fields={total} (+{inserted} new)")
+                        for field in profile_fields[:8]:
+                            label = f"{field.label}: " if field.label else ""
+                            print(
+                                f"    [{field.field_type}] {label}"
+                                f"{field.text_content[:90]}"
+                            )
+                        if len(profile_fields) > 8:
+                            print(f"    ... +{len(profile_fields) - 8} more")
+                    else:
+                        print("  profile fields skipped (empty / wrong screen)")
                 except Exception as exception:
                     print(f"  profile scrape failed: {exception}")
 
             # Leave profile/chat and land back on Matches list.
             press_back(device)
             time.sleep(0.8)
+            if not ensure_hinge_foreground(device):
+                print("  recovery: forcing Hinge + Matches after chat")
             open_matches(device, width, height)
             time.sleep(0.6)
 

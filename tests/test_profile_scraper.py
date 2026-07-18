@@ -7,8 +7,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from migrate import migrate_db
-from profile_scraper import extract_profile_fields_from_nodes
-from ui_dump import parse_ui_nodes
+from profile_scraper import _is_chrome, extract_profile_fields_from_nodes
+from ui_dump import is_hinge_xml, parse_ui_nodes, ui_packages
 import db as db_module
 
 
@@ -70,6 +70,34 @@ class ProfileScraperTest(unittest.TestCase):
                 self.assertEqual(len(loaded), 2)
                 stats = db_module.sync_stats()
                 self.assertEqual(stats["profile_fields"], 2)
+
+    def test_ignores_honor_settings_gt_spam(self):
+        """Wrong-screen Honor search shows 'GT GT ... Google TV' while scrolling."""
+        self.assertTrue(_is_chrome("GT GT GT GT GT GT GT GTGoogle TV", "Luana"))
+        self.assertTrue(_is_chrome("Google TV", "Luana"))
+        self.assertTrue(_is_chrome("Media|Ringtone|", "Luana"))
+        self.assertTrue(_is_chrome("Local", "Luana"))
+        self.assertFalse(_is_chrome("I never stay where I’ve outgrown.", "Vivi"))
+
+        settings_xml = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+        <hierarchy rotation="0">
+          <node index="0" text="" resource-id="" class="android.widget.FrameLayout"
+            package="com.hihonor.search" content-desc="" bounds="[0,0][1280,2800]">
+            <node index="0" text="Local" resource-id="" class="android.widget.TextView"
+              package="com.hihonor.search" content-desc="" bounds="[0,100][200,160]"/>
+            <node index="1" text="GT GT GT GTGoogle TV" resource-id="" class="android.widget.TextView"
+              package="com.hihonor.search" content-desc="GT GT GT GTGoogle TV"
+              bounds="[0,200][400,260]"/>
+          </node>
+        </hierarchy>
+        """
+        self.assertFalse(is_hinge_xml(settings_xml))
+        self.assertEqual(ui_packages(settings_xml), {"com.hihonor.search"})
+        nodes = parse_ui_nodes(settings_xml)
+        fields = extract_profile_fields_from_nodes(nodes, match_name="Luana")
+        texts = {field.text_content.lower() for field in fields}
+        self.assertNotIn("local", texts)
+        self.assertTrue(all("gt gt" not in t and "google tv" not in t for t in texts))
 
 
 if __name__ == "__main__":
