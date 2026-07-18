@@ -31,10 +31,11 @@ from device_lock import acquire_device_lock
 from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
 from reply_drafter import draft_scored_reply
 from style_learner import histories_from_db, infer_style_profile, messages_as_dicts
-from ui_dump import open_matches, press_back, swipe
+from ui_dump import ensure_hinge_foreground, open_matches, press_back, swipe
 from your_turn import (
     ConversationHistory,
     collect_chat_history,
+    conversation_open_for_match,
     ensure_matches_your_turn,
     focus_composer_and_type,
     list_match_conversations,
@@ -202,14 +203,34 @@ def run_init_style(max_chats: int, *, from_db: bool = False) -> None:
     )
 
 
+def _scroll_matches_to_your_turn(device, width: int, height: int) -> None:
+    """Fling Matches upward until Your turn count is readable."""
+    ensure_hinge_foreground(device, settle_s=0.6)
+    open_matches(device, width, height, settle_s=0.3)
+    for _ in range(10):
+        if your_turn_count(device) is not None:
+            return
+        swipe(
+            device,
+            width // 2,
+            int(height * 0.34),
+            width // 2,
+            int(height * 0.78),
+            260,
+        )
+        time.sleep(0.25)
+    ensure_matches_your_turn(device, width, height)
+
+
 def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
     device, width, height = _connect()
     if not device:
         return
 
-    open_hinge(device=device)
-    ensure_matches_your_turn(device, width, height)
+    open_hinge(device=device, settle_s=0.6, force=True)
+    _scroll_matches_to_your_turn(device, width, height)
 
+    max_stagnant = 8 if process_all else 3
     if process_all:
         counted = your_turn_count(device)
         max_chats = counted if counted is not None else ALL_CHATS_FALLBACK_LIMIT
@@ -227,7 +248,11 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
     processed_names = set()
     stagnant_pages = 0
 
-    while len(processed_names) < max_chats and stagnant_pages < 3:
+    while len(processed_names) < max_chats and stagnant_pages < max_stagnant:
+        if not ensure_hinge_foreground(device, settle_s=0.5):
+            print("Aborting drafts: could not keep Hinge foreground")
+            break
+        ensure_matches_your_turn(device, width, height)
         conversations = list_your_turn_conversations(device)
         page_new = 0
 
@@ -247,6 +272,14 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
                 print(f"  defer: {conversation.name} under bottom nav")
                 processed_names.discard(key)
                 continue
+            if not conversation_open_for_match(
+                device, conversation.name, height=height
+            ):
+                print(f"  skip: not in {conversation.name}'s chat after tap")
+                ensure_hinge_foreground(device, settle_s=0.5)
+                ensure_matches_your_turn(device, width, height)
+                continue
+
             history = collect_chat_history(
                 device,
                 width,
@@ -272,7 +305,9 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
                 result = draft_scored_reply(history, n_candidates=3)
             except Exception as exception:
                 print(f"Draft failed for {conversation.name}: {exception}")
-                press_back(device)
+                press_back(device, check_hinge=False)
+                ensure_hinge_foreground(device, settle_s=0.5)
+                ensure_matches_your_turn(device, width, height)
                 continue
 
             reply = result["reply"]
@@ -287,7 +322,10 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
 
             pasted = False
             if paste:
-                pasted = focus_composer_and_type(device, reply)
+                if conversation_open_for_match(
+                    device, conversation.name, height=height
+                ):
+                    pasted = focus_composer_and_type(device, reply)
                 label = "opener" if conversation.is_new_match else "reply"
                 print(
                     f"Pasted {label} into composer (not sent)."
@@ -308,8 +346,9 @@ def run(max_chats: int, paste: bool, process_all: bool = False) -> None:
                 run_id=run_id,
             )
 
-            press_back(device)
-            time.sleep(1.0)
+            press_back(device, check_hinge=False)
+            time.sleep(0.4)
+            ensure_hinge_foreground(device, settle_s=0.5)
             ensure_matches_your_turn(device, width, height)
 
         if page_new == 0:
