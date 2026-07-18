@@ -17,6 +17,11 @@ MESSAGE_DESC_RE = re.compile(
     re.DOTALL,
 )
 HINGE_PACKAGE = "co.hinge.app"
+COMPOSER_PLACEHOLDER = "send a message"
+COMPOSER_RESOURCE_FRAGMENTS = (
+    "messagecomposition",
+    "message_composition",
+)
 
 
 @dataclass
@@ -137,6 +142,51 @@ def find_nodes(
             continue
         matches.append(node)
     return matches
+
+
+def is_composer_node(node: UiNode) -> bool:
+    """
+    True for Hinge message-composer chrome (EditText / unsent draft / placeholder).
+    These must never be treated as chat bubbles or profile fields.
+    """
+    rid = (node.resource_id or "").lower()
+    if any(fragment in rid for fragment in COMPOSER_RESOURCE_FRAGMENTS):
+        return True
+    if node.editable or (node.class_name or "") == "EditText":
+        return True
+    text = (node.text or "").strip().lower()
+    desc = (node.content_desc or "").strip().lower()
+    if text == COMPOSER_PLACEHOLDER or desc == COMPOSER_PLACEHOLDER:
+        return True
+    return False
+
+
+def composer_draft_texts(nodes: List[UiNode]) -> Set[str]:
+    """Non-placeholder text currently sitting in composer EditText nodes."""
+    drafts: Set[str] = set()
+    for node in nodes:
+        if not is_composer_node(node):
+            continue
+        for candidate in (node.text, node.content_desc):
+            text = (candidate or "").strip()
+            if not text or text.lower() == COMPOSER_PLACEHOLDER:
+                continue
+            drafts.add(text)
+    return drafts
+
+
+def is_composer_draft_text(text: str, drafts: Optional[Set[str]] = None) -> bool:
+    """True for placeholder or an exact unsent composer draft string."""
+    normalized = re.sub(r"\s+", " ", (text or "").strip())
+    if not normalized:
+        return False
+    if normalized.lower() == COMPOSER_PLACEHOLDER:
+        return True
+    if drafts and normalized in drafts:
+        return True
+    if drafts and normalized.lower() in {d.lower() for d in drafts}:
+        return True
+    return False
 
 
 def tap_bounds(device, bounds: Bounds) -> None:

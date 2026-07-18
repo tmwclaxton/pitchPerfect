@@ -9,8 +9,11 @@ from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
 
 from ui_dump import (
+    composer_draft_texts,
     dump_ui_xml,
     find_nodes,
+    is_composer_draft_text,
+    is_composer_node,
     is_hinge_xml,
     parse_ui_nodes,
     swipe,
@@ -166,10 +169,14 @@ def extract_profile_fields_from_nodes(
             )
         )
 
+    drafts = composer_draft_texts(nodes)
+
     # Header name / verified from top content-descs.
     for node in nodes:
+        if is_composer_node(node):
+            continue
         desc = (node.content_desc or "").strip()
-        if not desc:
+        if not desc or is_composer_draft_text(desc, drafts):
             continue
         if re.search(r",\s*verified\s*$", desc, re.I):
             name_part = re.sub(r",\s*verified\s*$", "", desc, flags=re.I).strip()
@@ -184,6 +191,8 @@ def extract_profile_fields_from_nodes(
         if prompt:
             question = prompt.group(1).strip().rstrip(".")
             answer = prompt.group(2).strip()
+            if is_composer_draft_text(answer, drafts):
+                continue
             add(
                 "prompt",
                 question,
@@ -198,15 +207,19 @@ def extract_profile_fields_from_nodes(
     for node in nodes:
         rid = (node.resource_id or "").lower()
         # Ignore composer / send controls that overlay the profile.
-        if "messagecomposition" in rid or "sendmessage" in rid or "microphone" in rid:
+        if is_composer_node(node):
             continue
-        if (node.class_name or "") == "EditText":
+        if "sendmessage" in rid or "microphone" in rid:
             continue
         desc = (node.content_desc or "").strip()
         text = (node.text or "").strip()
         if desc and desc.lower() in BASIC_LABELS:
             labeled.append((node.bounds[1], desc, node.bounds))
-        if text and not _is_chrome(text, match_name):
+        if (
+            text
+            and not _is_chrome(text, match_name)
+            and not is_composer_draft_text(text, drafts)
+        ):
             text_nodes.append((node.bounds[1], text, node.bounds))
 
     labeled.sort(key=lambda item: item[0])

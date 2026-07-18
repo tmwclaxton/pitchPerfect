@@ -12,8 +12,11 @@ from ui_dump import (
     Bounds,
     MESSAGE_DESC_RE,
     bounds_center,
+    composer_draft_texts,
     dump_ui_xml,
     find_nodes,
+    is_composer_draft_text,
+    is_composer_node,
     open_matches,
     parse_ui_nodes,
     press_back,
@@ -188,9 +191,12 @@ def list_match_conversations(
         if not re.search(r"[A-Za-z]", name):
             continue
         # Composer / in-chat chrome sometimes appears if we aren't on Matches.
-        if "messagecomposition" in (node.resource_id or "").lower():
+        if is_composer_node(node):
             continue
-        if "send a message" in joined:
+        if is_composer_draft_text(name) or "send a message" in joined:
+            continue
+        # Unsent draft text often looks like a full sentence, not a first name.
+        if len(name.split()) >= 5 and ("?" in name or "." in name or "," in name):
             continue
         # Banner / empty-state rows sometimes look clickable.
         if "waiting for your reply" in joined or "end chats" in joined:
@@ -261,8 +267,13 @@ def _message_key(sender: str, text: str) -> str:
 
 def _parse_messages_from_nodes(nodes) -> Tuple[List[ChatMessage], List[str]]:
     """Return messages (top-to-bottom) and timestamp labels aligned by Y order."""
+    drafts = composer_draft_texts(nodes)
     timed_nodes = []
     for node in nodes:
+        # Never treat the unsent composer EditText / placeholder as a bubble.
+        if is_composer_node(node):
+            continue
+
         if re.match(
             r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Yesterday|Today)\b",
             node.text,
@@ -306,17 +317,20 @@ def _parse_messages_from_nodes(nodes) -> Tuple[List[ChatMessage], List[str]]:
                 text,
                 flags=re.IGNORECASE,
             ).strip()
-            if text:
+            if text and not is_composer_draft_text(text, drafts):
                 timed_nodes.append(("msg", node.bounds[1], sender, text))
             continue
 
         # Profile like / prompt like rows show as plain text, not message descs.
-        if node.text and re.match(
+        plain = (node.text or "").strip()
+        if plain and is_composer_draft_text(plain, drafts):
+            continue
+        if plain and re.match(
             r"^You liked .+\.?$",
-            node.text.strip(),
+            plain,
             re.IGNORECASE,
         ):
-            timed_nodes.append(("msg", node.bounds[1], "You", node.text.strip()))
+            timed_nodes.append(("msg", node.bounds[1], "You", plain))
 
     timed_nodes.sort(key=lambda item: item[1])
 
