@@ -50,6 +50,7 @@ from ui_dump import (
 from your_turn import (
     collect_chat_history,
     conversation_open_for_match,
+    conversation_row_tappable,
     list_match_conversations,
     open_conversation,
 )
@@ -57,29 +58,9 @@ from your_turn import (
 
 def _history_belongs_to_other_match(history, match_name: str) -> bool:
     """Detect cross-thread scrapes via 'You liked Other's photo' bubbles."""
-    want = (match_name or "").strip().lower()
-    if not want or not history.messages:
-        return False
-    for message in history.messages:
-        text = (message.text or "").strip()
-        sender = (message.sender or "").strip().lower()
-        if sender not in {"you", want} and sender not in {
-            "prompt",
-            "chat",
-            "profile",
-        }:
-            if len(sender) >= 2 and sender != want:
-                return True
-        lower = text.lower()
-        if "you liked " in lower and "'s " in lower:
-            try:
-                liked = lower.split("you liked ", 1)[1]
-                liked_name = liked.split("'s ", 1)[0].strip()
-            except IndexError:
-                continue
-            if liked_name and liked_name != want:
-                return True
-    return False
+    from sync_process import _history_belongs_to_other_match as _check
+
+    return _check(history.messages, match_name)
 
 
 def _ensure_matches_list(device, width: int, height: int, *, why: str) -> bool:
@@ -198,7 +179,6 @@ def run_sync_live(
             key = conversation.name.lower()
             if key in seen_names:
                 continue
-            seen_names.add(key)
             if key in {
                 "profile",
                 "chat",
@@ -217,6 +197,12 @@ def run_sync_live(
                 continue
             if key.startswith("their turn"):
                 continue
+            if not conversation_row_tappable(conversation, height=height):
+                print(
+                    f"\n=== defer (under bottom nav): {conversation.name} ==="
+                )
+                continue
+            seen_names.add(key)
 
             page_new += 1
             synced_names.add(key)
@@ -250,7 +236,13 @@ def run_sync_live(
                 print(f"  skip: not on Matches list before {conversation.name}")
                 continue
 
-            open_conversation(device, conversation, settle_s=0.35)
+            if not open_conversation(
+                device, conversation, settle_s=0.35, height=height
+            ):
+                print(f"  defer: {conversation.name} row not safely tappable")
+                synced_names.discard(key)
+                seen_names.discard(key)
+                continue
             open_ctx = classify_device_screen(
                 device, height, expect_match=conversation.name
             )

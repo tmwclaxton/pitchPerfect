@@ -105,6 +105,51 @@ def bounds_center(bounds: Bounds) -> Tuple[int, int]:
     return (x1 + x2) // 2, (y1 + y2) // 2
 
 
+def content_tap_point(
+    bounds: Bounds,
+    height: int,
+    *,
+    top_frac: float = 0.12,
+    bottom_frac: float = 0.90,
+    min_span: int = 48,
+) -> Optional[Tuple[int, int]]:
+    """
+    Tap point inside bounds that stays clear of status/header and bottom nav.
+
+    Rows clipped under the bottom nav have a center that lands on Likes You /
+    Matches tabs — return None so the caller can scroll the row into view.
+    """
+    x1, y1, x2, y2 = bounds
+    if height <= 0:
+        return bounds_center(bounds)
+    safe_top = int(height * top_frac)
+    safe_bottom = int(height * bottom_frac)
+    tap_top = max(y1, safe_top) + 8
+    tap_bottom = min(y2, safe_bottom) - 8
+    if tap_bottom - tap_top < min_span:
+        return None
+    return (x1 + x2) // 2, (tap_top + tap_bottom) // 2
+
+
+def tap_bounds(device, bounds: Bounds) -> None:
+    x, y = bounds_center(bounds)
+    device.shell(f"input tap {x} {y}")
+
+
+def tap_bounds_in_content(
+    device,
+    bounds: Bounds,
+    height: int,
+) -> bool:
+    """Tap a row safely above the bottom nav. False if the row must be scrolled."""
+    point = content_tap_point(bounds, height)
+    if point is None:
+        return False
+    x, y = point
+    device.shell(f"input tap {x} {y}")
+    return True
+
+
 def dump_ui_xml(device, remote_path: str = "/sdcard/window_dump.xml") -> str:
     device.shell(f"uiautomator dump {remote_path}")
     # `cat` can truncate very large dumps; Hinge dumps are small enough.
@@ -145,8 +190,9 @@ def ensure_hinge_foreground(
     print(f"Left Hinge (foreground: {packages}); reopening co.hinge.app")
     open_hinge(device, settle_s=settle_s, force=True)
     xml_text = dump_ui_xml(device)
-    ok = is_hinge_xml(xml_text)
+    ok = is_hinge_xml(xml_text) or hinge_is_foreground(device)
     if not ok:
+        # Empty uiautomator dumps happen after force-stop; dumpsys is enough.
         print("Failed to recover Hinge foreground")
     return ok
 
@@ -254,11 +300,6 @@ def is_composer_draft_text(text: str, drafts: Optional[Set[str]] = None) -> bool
     if drafts and normalized.lower() in {d.lower() for d in drafts}:
         return True
     return False
-
-
-def tap_bounds(device, bounds: Bounds) -> None:
-    x, y = bounds_center(bounds)
-    device.shell(f"input tap {x} {y}")
 
 
 def swipe(

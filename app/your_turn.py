@@ -14,6 +14,7 @@ from ui_dump import (
     bounds_center,
     classify_hinge_screen,
     composer_draft_texts,
+    content_tap_point,
     dump_ui_xml,
     find_nodes,
     is_composer_draft_text,
@@ -25,6 +26,7 @@ from ui_dump import (
     press_back,
     swipe,
     tap_bounds,
+    tap_bounds_in_content,
 )
 
 
@@ -497,9 +499,23 @@ def open_conversation(
     conversation: ConversationPreview,
     *,
     settle_s: float = 0.35,
-) -> None:
-    tap_bounds(device, conversation.bounds)
+    height: int = 2800,
+) -> bool:
+    """
+    Open a Matches row. Returns False when the row sits under the bottom nav
+    (caller should scroll it into view instead of tapping Likes You / tabs).
+    """
+    if not tap_bounds_in_content(device, conversation.bounds, height):
+        return False
     time.sleep(max(0.2, float(settle_s)))
+    return True
+
+
+def conversation_row_tappable(
+    conversation: ConversationPreview, *, height: int = 2800
+) -> bool:
+    """True when a safe content tap exists for this Matches row."""
+    return content_tap_point(conversation.bounds, height) is not None
 
 
 def conversation_open_for_match(device, match_name: str, *, height: int = 2800) -> bool:

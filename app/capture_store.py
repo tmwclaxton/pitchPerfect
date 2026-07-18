@@ -262,15 +262,28 @@ def mark_match_progress(
 
 def completed_match_keys(run: CaptureRun) -> Set[str]:
     """Keys that should not be re-opened while resuming this run."""
-    keys: Set[str] = set(run.meta.get("completed_keys") or [])
+    failed = {
+        name_key(k) for k in (run.meta.get("failed_keys") or [])
+    }
+    keys: Set[str] = set()
+    for key in run.meta.get("completed_keys") or []:
+        nk = name_key(key)
+        if nk not in failed:
+            keys.add(nk)
     for key, meta in (run.matches or {}).items():
         status = (meta or {}).get("capture_status")
         if status in {"done", "skipped_fresh"}:
             keys.add(key)
-    # Also treat matches that already have chat dumps as done.
+        elif status == "failed":
+            failed.add(key)
+            keys.discard(key)
+    # Chat dumps count as done only when not marked failed (retry those).
     for asset in run.assets:
-        if asset.match_name and asset.kind == "chat":
-            keys.add(name_key(asset.match_name))
+        if not asset.match_name or asset.kind != "chat":
+            continue
+        nk = name_key(asset.match_name)
+        if nk not in failed:
+            keys.add(nk)
     return keys
 
 

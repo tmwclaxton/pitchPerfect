@@ -35,6 +35,27 @@ from ui_dump import parse_ui_nodes
 from your_turn import ChatMessage, _message_key, _parse_messages_from_nodes
 
 
+_CHROME_SENDERS = {
+    "you",
+    "prompt",
+    "chat",
+    "profile",
+    "duration",
+    "photo prompt",
+    "voice note",
+}
+
+
+def _is_chrome_sender(sender: str) -> bool:
+    """UI chrome labels that are not another match's name."""
+    lowered = (sender or "").strip().lower()
+    if not lowered or lowered in _CHROME_SENDERS:
+        return True
+    if lowered.endswith(" prompt") or lowered.startswith("duration"):
+        return True
+    return False
+
+
 def _history_belongs_to_other_match(
     messages: Sequence[ChatMessage], match_name: str
 ) -> bool:
@@ -44,13 +65,13 @@ def _history_belongs_to_other_match(
     for message in messages:
         text = (message.text or "").strip()
         sender = (message.sender or "").strip().lower()
-        if sender not in {"you", want} and sender not in {
-            "prompt",
-            "chat",
-            "profile",
-        }:
-            if len(sender) >= 2 and sender != want:
-                return True
+        if (
+            sender
+            and sender != want
+            and not _is_chrome_sender(sender)
+            and len(sender) >= 2
+        ):
+            return True
         lower = text.lower()
         if "you liked " in lower and "'s " in lower:
             try:

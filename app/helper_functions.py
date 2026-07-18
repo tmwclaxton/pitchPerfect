@@ -270,8 +270,26 @@ def open_hinge(device, settle_s: float = 0.8, *, force: bool = False):
     package_name = "co.hinge.app"
     if not force and hinge_is_foreground(device):
         return
+    if force:
+        # Honor Search / system UI can trap automation after a bad tap.
+        for pkg in (
+            "com.hihonor.search",
+            "com.android.settings",
+            "com.hihonor.android.launcher",
+        ):
+            try:
+                device.shell(f"am force-stop {pkg}")
+            except Exception:
+                pass
     device.shell(f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1")
     time.sleep(max(0.25, float(settle_s)))
+    if force and not hinge_is_foreground(device):
+        # Second try via explicit activity launch.
+        device.shell(
+            "am start -a android.intent.action.MAIN "
+            "-c android.intent.category.LAUNCHER -p co.hinge.app"
+        )
+        time.sleep(max(0.35, float(settle_s)))
 
 
 def open_discover(device, width, height):

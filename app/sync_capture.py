@@ -42,6 +42,7 @@ from ui_dump import (
 )
 from your_turn import (
     conversation_open_for_match,
+    conversation_row_tappable,
     list_match_conversations,
     open_conversation,
 )
@@ -458,7 +459,6 @@ def run_capture(
                 key = name_key(conversation.name)
                 if key in seen_names:
                     continue
-                seen_names.add(key)
                 if key in {
                     "profile",
                     "chat",
@@ -477,6 +477,13 @@ def run_capture(
                     continue
                 if key.startswith("their turn"):
                     continue
+                # Row center under bottom nav taps Likes You — wait for scroll.
+                if not conversation_row_tappable(conversation, height=height):
+                    print(
+                        f"\n=== defer (under bottom nav): {conversation.name} ==="
+                    )
+                    continue
+                seen_names.add(key)
 
                 page_new += 1
                 section = conversation.section or "unknown"
@@ -552,7 +559,15 @@ def run_capture(
                     _fail("not on Matches before open")
                     continue
 
-                open_conversation(device, conversation, settle_s=0.35)
+                if not open_conversation(
+                    device, conversation, settle_s=0.35, height=height
+                ):
+                    print(
+                        f"  defer: {conversation.name} row not safely tappable"
+                    )
+                    captured_names.discard(key)
+                    seen_names.discard(key)
+                    continue
                 # Single dump after open: classify + off-Hinge recovery.
                 open_ctx = classify_device_screen(
                     device, height, expect_match=conversation.name
