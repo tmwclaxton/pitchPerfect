@@ -6,11 +6,13 @@ Phase A (capture): walk the device, save UIAutomator XML dumps (+ optional PNGs)
 Phase B (process): parse dumps in a thread pool and upsert into SQLite.
 
 Examples:
-  python sync_chats.py                      # capture then process
+  python sync_chats.py                      # resume + skip fresh, then process
   python sync_chats.py --capture-only
   python sync_chats.py --process-only
   python sync_chats.py --process-only --run-dir data/captures/…_run3
   python sync_chats.py --max-chats 5 --workers 6
+  python sync_chats.py --force              # re-capture everyone (no resume)
+  python sync_chats.py --no-resume          # new run, still skip fresh
   python sync_chats.py --screenshots        # also save PNGs during capture
   python sync_chats.py --live               # old single-phase device loop
   python migrate.py
@@ -515,7 +517,18 @@ def main() -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Re-capture even when the match is fresh in SQLite.",
+        help=(
+            "Re-capture everyone: ignore fresh DB skips and do not resume "
+            "an interrupted capture run."
+        ),
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help=(
+            "Start a new capture run even if an interrupted one exists "
+            "(still skips fresh matches unless --force)."
+        ),
     )
     parser.add_argument(
         "--fresh-hours",
@@ -523,7 +536,7 @@ def main() -> None:
         default=DEFAULT_FRESH_HOURS,
         help=(
             "Skip matches synced within this many hours "
-            f"(default {DEFAULT_FRESH_HOURS:g})."
+            f"(default {DEFAULT_FRESH_HOURS:g}; use --force to disable)."
         ),
     )
     args = parser.parse_args()
@@ -546,7 +559,8 @@ def main() -> None:
         )
         return
 
-    # Default: capture then process (or capture-only).
+    # Default: resume interrupted capture when present, skip fresh matches,
+    # then process. --force re-does everyone from a new run.
     capture_run = run_capture(
         max_chats=args.max_chats,
         skip_new=args.skip_new,
@@ -554,6 +568,7 @@ def main() -> None:
         force=args.force,
         fresh_hours=args.fresh_hours,
         with_screenshots=args.screenshots,
+        resume=not args.no_resume and not args.force,
     )
     if args.capture_only:
         print("Capture-only done; run with --process-only to upsert SQLite.")

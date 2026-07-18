@@ -156,6 +156,15 @@ def process_one_match(
         result["error"] = "no captured frames"
         return result
 
+    # Resume: skip matches whose assets were already processed successfully.
+    actionable = [a for a in (*chat_assets, *profile_assets)]
+    if actionable and all(
+        (a.process_status or "") in {"done", "skipped"} for a in actionable
+    ):
+        result["skipped"] = True
+        result["error"] = f"already processed ({actionable[0].process_status})"
+        return result
+
     try:
         chat_xmls = [read_asset_xml(run, asset) for asset in chat_assets]
         messages = _merge_chat_messages(chat_xmls)

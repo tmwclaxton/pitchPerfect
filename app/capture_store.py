@@ -8,7 +8,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from config import CAPTURES_DIR
 from db import connect, name_key
@@ -125,6 +125,66 @@ def set_capture_run_status(run_id: int, status: str) -> None:
         )
 
 
+def persist_run_progress(run: CaptureRun) -> None:
+    """Flush run.meta + matches into SQLite and manifest.json (resume cursor)."""
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE capture_runs
+            SET status = ?, meta_json = ?
+            WHERE id = ?
+            """,
+            (run.status, json.dumps(run.meta), run.id),
+        )
+    write_manifest(run)
+
+
+def abandon_stale_capture_runs(*, except_id: Optional[int] = None) -> int:
+    """Mark older incomplete capture runs abandoned so resume picks the right one."""
+    with connect() as conn:
+        if except_id is None:
+            cur = conn.execute(
+                """
+                UPDATE capture_runs
+                SET status = 'abandoned'
+                WHERE status IN ('capturing', 'interrupted', 'failed')
+                """
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE capture_runs
+                SET status = 'abandoned'
+                WHERE status IN ('capturing', 'interrupted', 'failed')
+                  AND id != ?
+                """,
+                (except_id,),
+            )
+        return int(cur.rowcount or 0)
+
+
+def find_resumable_capture_run() -> Optional[CaptureRun]:
+    """Latest incomplete capture run that still has an on-disk root."""
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id FROM capture_runs
+            WHERE status IN ('capturing', 'interrupted', 'failed')
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        run = load_capture_run(run_id=int(row["id"]))
+    except FileNotFoundError:
+        return None
+    if not run.root_dir or not os.path.isdir(run.root_dir):
+        return None
+    return run
+
+
 def register_match_meta(
     run: CaptureRun,
     match_name: str,
@@ -132,18 +192,86 @@ def register_match_meta(
     section: str = "unknown",
     preview: str = "",
     is_new_match: bool = False,
+    capture_status: Optional[str] = None,
 ) -> None:
-    run.matches[name_key(match_name)] = {
-        "name": match_name,
-        "section": section,
-        "preview": preview,
-        "is_new_match": bool(is_new_match),
-    }
+    key = name_key(match_name)
+    existing = dict(run.matches.get(key) or {})
+    existing.update(
+        {
+            "name": match_name,
+            "section": section,
+            "preview": preview,
+            "is_new_match": bool(is_new_match),
+        }
+    )
+    if capture_status:
+        existing["capture_status"] = capture_status
+        existing["updated_at"] = _utc_now()
+    run.matches[key] = existing
     match_dir = os.path.join(run.root_dir, "matches", _slug(match_name))
     os.makedirs(match_dir, exist_ok=True)
     meta_path = os.path.join(match_dir, "meta.json")
     with open(meta_path, "w", encoding="utf-8") as handle:
-        json.dump(run.matches[name_key(match_name)], handle, indent=2)
+        json.dump(existing, handle, indent=2)
+
+
+def mark_match_progress(
+    run: CaptureRun,
+    match_name: str,
+    *,
+    capture_status: str,
+    section: str = "unknown",
+    preview: str = "",
+    is_new_match: bool = False,
+    detail: str = "",
+) -> None:
+    """
+    Record per-match capture progress for resume.
+    capture_status: done | skipped_fresh | failed | capturing
+    """
+    key = name_key(match_name)
+    register_match_meta(
+        run,
+        match_name,
+        section=section,
+        preview=preview,
+        is_new_match=is_new_match,
+        capture_status=capture_status,
+    )
+    if detail:
+        run.matches[key]["detail"] = detail
+
+    done = list(run.meta.get("completed_keys") or [])
+    failed = list(run.meta.get("failed_keys") or [])
+    if capture_status in {"done", "skipped_fresh"}:
+        if key not in done:
+            done.append(key)
+        failed = [item for item in failed if item != key]
+    elif capture_status == "failed":
+        if key not in failed:
+            failed.append(key)
+        # Keep retryable: do not add to completed_keys.
+    run.meta["completed_keys"] = done
+    run.meta["failed_keys"] = failed
+    run.meta["last_match"] = match_name
+    run.meta["last_match_key"] = key
+    run.meta["last_capture_status"] = capture_status
+    run.meta["progress_updated_at"] = _utc_now()
+    persist_run_progress(run)
+
+
+def completed_match_keys(run: CaptureRun) -> Set[str]:
+    """Keys that should not be re-opened while resuming this run."""
+    keys: Set[str] = set(run.meta.get("completed_keys") or [])
+    for key, meta in (run.matches or {}).items():
+        status = (meta or {}).get("capture_status")
+        if status in {"done", "skipped_fresh"}:
+            keys.add(key)
+    # Also treat matches that already have chat dumps as done.
+    for asset in run.assets:
+        if asset.match_name and asset.kind == "chat":
+            keys.add(name_key(asset.match_name))
+    return keys
 
 
 def save_ui_dump(

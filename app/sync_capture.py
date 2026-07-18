@@ -13,13 +13,18 @@ from typing import Optional, Set
 
 from capture_store import (
     CaptureRun,
+    abandon_stale_capture_runs,
+    completed_match_keys,
     create_capture_run,
+    find_resumable_capture_run,
     finish_capture_run,
+    mark_match_progress,
+    persist_run_progress,
     register_match_meta,
     save_ui_dump,
     write_manifest,
 )
-from db import match_is_fresh
+from db import match_is_fresh, name_key
 from helper_functions import connect_device_auto, get_screen_resolution, open_hinge
 from profile_scraper import open_profile_tab
 from ui_dump import (
@@ -337,29 +342,66 @@ def run_capture(
     with_screenshots: bool = False,
     chat_scrolls: int = DEFAULT_CHAT_SCROLLS,
     profile_scrolls: int = DEFAULT_PROFILE_SCROLLS,
+    resume: bool = True,
 ) -> CaptureRun:
-    """Phase A entrypoint: device walk + UI dump capture."""
+    """Phase A entrypoint: device walk + UI dump capture (resumable by default)."""
     device = connect_device_auto()
     if not device:
         raise RuntimeError("No device connected")
     width, height = get_screen_resolution(device)
 
-    run = create_capture_run(
-        {
-            "max_chats": max_chats,
-            "skip_new": skip_new,
-            "skip_profile": skip_profile,
-            "force": force,
-            "fresh_hours": fresh_hours,
-            "with_screenshots": with_screenshots,
-            "phase": "capture",
-        }
-    )
-    print(f"Capture run {run.id} → {run.root_dir}")
+    resumed = False
+    run: Optional[CaptureRun] = None
+    if resume and not force:
+        run = find_resumable_capture_run()
+        if run is not None:
+            resumed = True
+            run.status = "capturing"
+            run.meta.update(
+                {
+                    "max_chats": max_chats,
+                    "skip_new": skip_new,
+                    "skip_profile": skip_profile,
+                    "force": force,
+                    "fresh_hours": fresh_hours,
+                    "with_screenshots": with_screenshots,
+                    "phase": "capture",
+                    "resumed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+            )
+            abandon_stale_capture_runs(except_id=run.id)
+            persist_run_progress(run)
+            print(f"Resuming capture run {run.id} → {run.root_dir}")
+            last = run.meta.get("last_match")
+            done_n = len(completed_match_keys(run))
+            print(
+                f"  checkpoint: {done_n} done"
+                + (f", last={last}" if last else "")
+            )
+
+    if run is None:
+        abandon_stale_capture_runs()
+        run = create_capture_run(
+            {
+                "max_chats": max_chats,
+                "skip_new": skip_new,
+                "skip_profile": skip_profile,
+                "force": force,
+                "fresh_hours": fresh_hours,
+                "with_screenshots": with_screenshots,
+                "phase": "capture",
+                "completed_keys": [],
+                "failed_keys": [],
+            }
+        )
+        print(f"Capture run {run.id} → {run.root_dir}")
+
     print(
         f"Capturing up to {max_chats} match(es)"
         + (" + profiles" if not skip_profile else "")
         + (" + PNGs" if with_screenshots else " (XML only)")
+        + ("" if force else f"; skip fresh <{fresh_hours:g}h")
+        + (" [RESUME]" if resumed else "")
     )
 
     open_hinge(device=device, settle_s=0.6)
@@ -376,11 +418,12 @@ def run_capture(
             with_screenshots=with_screenshots,
         )
 
-    captured_names: Set[str] = set()
-    seen_names: Set[str] = set()
-    skipped_fresh = 0
+    already_done = completed_match_keys(run) if (resumed or not force) else set()
+    captured_names: Set[str] = set(already_done)
+    seen_names: Set[str] = set(already_done)
+    skipped_fresh = int(run.meta.get("skipped_fresh") or 0)
     stagnant_pages = 0
-    list_page = 0
+    list_page = int(run.meta.get("list_page") or 0)
 
     try:
         while len(captured_names) < max_chats and stagnant_pages < 8:
@@ -391,6 +434,7 @@ def run_capture(
                 break
 
             list_page += 1
+            run.meta["list_page"] = list_page
             list_xml = dump_ui_xml(device)
             _capture_dump(
                 run,
@@ -411,7 +455,7 @@ def run_capture(
             for conversation in conversations:
                 if len(captured_names) >= max_chats:
                     break
-                key = conversation.name.lower()
+                key = name_key(conversation.name)
                 if key in seen_names:
                     continue
                 seen_names.add(key)
@@ -436,6 +480,16 @@ def run_capture(
 
                 page_new += 1
                 section = conversation.section or "unknown"
+                preview = conversation.preview or ""
+
+                # Resume checkpoint: already captured/skipped in this run.
+                if not force and key in already_done:
+                    print(
+                        f"\n=== skip done: {conversation.name} "
+                        f"[{section}] ({len(captured_names)+1}/{max_chats}) ==="
+                    )
+                    captured_names.add(key)
+                    continue
 
                 if not force and match_is_fresh(
                     conversation.name,
@@ -448,6 +502,15 @@ def run_capture(
                         f"[{section}] ({len(captured_names)+1}/{max_chats}) ==="
                     )
                     captured_names.add(key)
+                    already_done.add(key)
+                    mark_match_progress(
+                        run,
+                        conversation.name,
+                        capture_status="skipped_fresh",
+                        section=section,
+                        preview=preview,
+                        is_new_match=conversation.is_new_match,
+                    )
                     continue
 
                 captured_names.add(key)
@@ -455,16 +518,29 @@ def run_capture(
                     f"\n=== capture: {conversation.name} "
                     f"[{section}] ({len(captured_names)}/{max_chats}) ==="
                 )
-                if conversation.preview:
-                    print(f"Preview: {conversation.preview}")
+                if preview:
+                    print(f"Preview: {preview}")
 
                 register_match_meta(
                     run,
                     conversation.name,
                     section=section,
-                    preview=conversation.preview or "",
+                    preview=preview,
                     is_new_match=conversation.is_new_match,
+                    capture_status="capturing",
                 )
+                persist_run_progress(run)
+
+                def _fail(detail: str) -> None:
+                    mark_match_progress(
+                        run,
+                        conversation.name,
+                        capture_status="failed",
+                        section=section,
+                        preview=preview,
+                        is_new_match=conversation.is_new_match,
+                        detail=detail,
+                    )
 
                 if not _ensure_matches_list(
                     device,
@@ -473,6 +549,7 @@ def run_capture(
                     why=f"before opening {conversation.name}",
                 ):
                     print(f"  skip: not on Matches before {conversation.name}")
+                    _fail("not on Matches before open")
                     continue
 
                 open_conversation(device, conversation, settle_s=0.35)
@@ -486,6 +563,7 @@ def run_capture(
                         recover_to_matches(
                             device, width, height, reason="left Hinge after open"
                         )
+                        _fail("left Hinge after open")
                         continue
                     open_ctx = classify_device_screen(
                         device, height, expect_match=conversation.name
@@ -504,6 +582,7 @@ def run_capture(
                             f"{open_ctx.kind}"
                         ),
                     )
+                    _fail(f"landed on {open_ctx.kind}")
                     continue
 
                 if not conversation_open_for_match(
@@ -519,6 +598,7 @@ def run_capture(
                         height,
                         reason=f"wrong chat after tapping {conversation.name}",
                     )
+                    _fail("wrong chat / stale tap")
                     continue
 
                 chat_frames = _capture_chat_scrolls(
@@ -543,8 +623,10 @@ def run_capture(
                         height,
                         reason=f"lost during chat capture for {conversation.name}",
                     )
+                    _fail(f"lost during chat ({mid.kind})")
                     continue
 
+                profile_frames = 0
                 if not skip_profile:
                     profile_frames = _capture_profile_scrolls(
                         run,
@@ -570,6 +652,7 @@ def run_capture(
                                 f"{conversation.name}"
                             ),
                         )
+                        _fail(f"lost during profile ({post.kind})")
                         continue
 
                 press_back(device, settle_s=0.2, check_hinge=False)
@@ -581,12 +664,27 @@ def run_capture(
                     reason=f"after capturing {conversation.name}",
                     lost=False,
                 )
-                write_manifest(run)
+                already_done.add(key)
+                mark_match_progress(
+                    run,
+                    conversation.name,
+                    capture_status="done",
+                    section=section,
+                    preview=preview,
+                    is_new_match=conversation.is_new_match,
+                    detail=(
+                        f"chat_frames={chat_frames} "
+                        f"profile_frames={profile_frames}"
+                    ),
+                )
 
             if page_new == 0:
                 stagnant_pages += 1
             else:
                 stagnant_pages = 0
+            run.meta["stagnant_pages"] = stagnant_pages
+            run.meta["skipped_fresh"] = skipped_fresh
+            persist_run_progress(run)
 
             if len(captured_names) < max_chats:
                 if not _scroll_matches_list(device, width, height):
@@ -600,13 +698,38 @@ def run_capture(
                 "matches_visited": len(captured_names),
                 "skipped_fresh": skipped_fresh,
                 "assets": len(run.assets),
+                "completed_keys": sorted(already_done),
             },
         )
+    except KeyboardInterrupt:
+        run.status = "interrupted"
+        finish_capture_run(
+            run,
+            status="interrupted",
+            meta_update={
+                "matches_visited": len(captured_names),
+                "skipped_fresh": skipped_fresh,
+                "assets": len(run.assets),
+                "completed_keys": sorted(already_done),
+                "error": "KeyboardInterrupt",
+            },
+        )
+        print(
+            f"\nInterrupted — progress saved on run {run.id} "
+            f"({len(already_done)} done). Re-run to resume."
+        )
+        raise
     except Exception as exception:
         finish_capture_run(
             run,
-            status="failed",
-            meta_update={"error": str(exception)},
+            status="interrupted",
+            meta_update={
+                "matches_visited": len(captured_names),
+                "skipped_fresh": skipped_fresh,
+                "assets": len(run.assets),
+                "completed_keys": sorted(already_done),
+                "error": str(exception),
+            },
         )
         raise
 
