@@ -7,6 +7,8 @@ Examples:
   python sync_chats.py --max-chats 5
   python sync_chats.py --skip-new
   python sync_chats.py --skip-profile
+  python sync_chats.py --force                 # re-scrape even if fresh in DB
+  python sync_chats.py --fresh-hours 12
   python migrate.py   # apply schema only
 """
 
@@ -20,6 +22,7 @@ from dotenv import load_dotenv
 from config import SQLITE_PATH
 from db import (
     finish_run,
+    match_is_fresh,
     start_run,
     sync_stats,
     upsert_match_history,
@@ -37,6 +40,7 @@ from your_turn import (
 
 # Safety ceiling when the Matches list is huge / count unknown.
 DEFAULT_MAX_CHATS = 200
+DEFAULT_FRESH_HOURS = 24.0
 
 
 def _scroll_matches_list(device, width: int, height: int) -> None:
@@ -46,12 +50,12 @@ def _scroll_matches_list(device, width: int, height: int) -> None:
         int(height * 0.75),
         width // 2,
         int(height * 0.40),
-        400,
+        320,
     )
-    time.sleep(1.2)
+    time.sleep(0.7)
 
 
-def _scroll_matches_to_top(device, width: int, height: int, passes: int = 4) -> None:
+def _scroll_matches_to_top(device, width: int, height: int, passes: int = 2) -> None:
     for _ in range(passes):
         swipe(
             device,
@@ -59,9 +63,9 @@ def _scroll_matches_to_top(device, width: int, height: int, passes: int = 4) -> 
             int(height * 0.35),
             width // 2,
             int(height * 0.85),
-            300,
+            260,
         )
-        time.sleep(0.7)
+        time.sleep(0.4)
 
 
 def run_sync(
@@ -69,6 +73,8 @@ def run_sync(
     max_chats: int,
     skip_new: bool = False,
     skip_profile: bool = False,
+    force: bool = False,
+    fresh_hours: float = DEFAULT_FRESH_HOURS,
 ) -> None:
     load_dotenv()
     device = connect_device_auto()
@@ -76,8 +82,8 @@ def run_sync(
         return
     width, height = get_screen_resolution(device)
 
-    open_hinge(device=device)
-    open_matches(device, width, height)
+    open_hinge(device=device, settle_s=2.5)
+    open_matches(device, width, height, settle_s=1.0)
     _scroll_matches_to_top(device, width, height)
 
     run_id = start_run(
@@ -86,6 +92,8 @@ def run_sync(
             "max_chats": max_chats,
             "skip_new": skip_new,
             "skip_profile": skip_profile,
+            "force": force,
+            "fresh_hours": fresh_hours,
             "sqlite": SQLITE_PATH,
         },
     )
@@ -94,9 +102,17 @@ def run_sync(
         + (" + profiles" if not skip_profile else "")
         + f" into {SQLITE_PATH}"
     )
+    if not force:
+        print(
+            f"Skipping matches synced in the last {fresh_hours:g}h "
+            f"with messages"
+            + (" + profiles" if not skip_profile else "")
+            + " (use --force to re-scrape)"
+        )
 
     synced_names = set()
     seen_names = set()
+    skipped_fresh = 0
     stagnant_pages = 0
     total_msg_inserted = 0
     total_profile_inserted = 0
@@ -123,6 +139,19 @@ def run_sync(
             page_new += 1
             synced_names.add(key)
             section = conversation.section or "unknown"
+
+            if not force and match_is_fresh(
+                conversation.name,
+                require_profile=not skip_profile,
+                max_age_hours=fresh_hours,
+            ):
+                skipped_fresh += 1
+                print(
+                    f"\n=== skip fresh: {conversation.name} "
+                    f"[{section}] ({len(synced_names)}/{max_chats}) ==="
+                )
+                continue
+
             print(
                 f"\n=== sync: {conversation.name} "
                 f"[{section}] ({len(synced_names)}/{max_chats}) ==="
@@ -130,14 +159,18 @@ def run_sync(
             if conversation.preview:
                 print(f"Preview: {conversation.preview}")
 
-            open_conversation(device, conversation)
-            if not ensure_hinge_foreground(device):
+            open_conversation(device, conversation, settle_s=1.2)
+            if not ensure_hinge_foreground(device, settle_s=2.0):
                 print("  skip: could not stay in Hinge after opening chat")
-                open_matches(device, width, height)
+                open_matches(device, width, height, settle_s=0.8)
                 continue
 
             history = collect_chat_history(
-                device, width, height, conversation.name
+                device,
+                width,
+                height,
+                conversation.name,
+                settle_bottom=False,
             )
             history.is_new_match = conversation.is_new_match
 
@@ -193,12 +226,12 @@ def run_sync(
                     print(f"  profile scrape failed: {exception}")
 
             # Leave profile/chat and land back on Matches list.
-            press_back(device)
-            time.sleep(0.8)
-            if not ensure_hinge_foreground(device):
+            press_back(device, settle_s=0.5)
+            time.sleep(0.35)
+            if not ensure_hinge_foreground(device, settle_s=2.0):
                 print("  recovery: forcing Hinge + Matches after chat")
-            open_matches(device, width, height)
-            time.sleep(0.6)
+            open_matches(device, width, height, settle_s=0.8)
+            time.sleep(0.3)
 
         if page_new == 0:
             stagnant_pages += 1
@@ -213,6 +246,7 @@ def run_sync(
         run_id,
         {
             "chats_synced": len(synced_names),
+            "skipped_fresh": skipped_fresh,
             "messages_inserted": total_msg_inserted,
             "profile_fields_inserted": total_profile_inserted,
             "db_matches": stats["matches"],
@@ -222,6 +256,7 @@ def run_sync(
     )
     print("\n--- sync complete ---")
     print(f"Chats visited this run: {len(synced_names)}")
+    print(f"Skipped (fresh in DB): {skipped_fresh}")
     print(f"New message rows inserted: {total_msg_inserted}")
     print(f"New profile field rows inserted: {total_profile_inserted}")
     print(
@@ -253,11 +288,28 @@ def main() -> None:
         action="store_true",
         help="Only sync chat history (skip Profile tab).",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-scrape even when the match is fresh in SQLite.",
+    )
+    parser.add_argument(
+        "--fresh-hours",
+        type=float,
+        default=DEFAULT_FRESH_HOURS,
+        help=(
+            "Skip matches that already have messages (+ profiles unless "
+            f"--skip-profile) synced within this many hours "
+            f"(default {DEFAULT_FRESH_HOURS:g})."
+        ),
+    )
     args = parser.parse_args()
     run_sync(
         max_chats=args.max_chats,
         skip_new=args.skip_new,
         skip_profile=args.skip_profile,
+        force=args.force,
+        fresh_hours=args.fresh_hours,
     )
 
 

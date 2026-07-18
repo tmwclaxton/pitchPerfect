@@ -64,7 +64,7 @@ def is_hinge_xml(xml_text: str) -> bool:
     return HINGE_PACKAGE in packages
 
 
-def ensure_hinge_foreground(device) -> bool:
+def ensure_hinge_foreground(device, *, settle_s: float = 2.5) -> bool:
     """
     If the phone left Hinge (e.g. Honor/Android Settings search), reopen it.
     Returns True when Hinge is foreground after the call.
@@ -77,7 +77,7 @@ def ensure_hinge_foreground(device) -> bool:
     # Import lazily to avoid circular imports with helper_functions.
     from helper_functions import open_hinge
 
-    open_hinge(device)
+    open_hinge(device, settle_s=settle_s)
     xml_text = dump_ui_xml(device)
     ok = is_hinge_xml(xml_text)
     if not ok:
@@ -205,11 +205,22 @@ def swipe(
     device.shell(f"input swipe {x1} {y1} {x2} {y2} {duration_ms}")
 
 
-def open_matches(device, width: int, height: int) -> None:
+def open_matches(
+    device,
+    width: int,
+    height: int,
+    *,
+    settle_s: float = 1.0,
+    xml_text: Optional[str] = None,
+) -> None:
     """Open the Matches tab (speech-bubble nav item)."""
-    if not ensure_hinge_foreground(device):
-        return
-    nodes = parse_ui_nodes(dump_ui_xml(device))
+    if xml_text is None or not is_hinge_xml(xml_text):
+        xml_text = dump_ui_xml(device)
+        if not is_hinge_xml(xml_text):
+            if not ensure_hinge_foreground(device):
+                return
+            xml_text = dump_ui_xml(device)
+    nodes = parse_ui_nodes(xml_text)
     matches = find_nodes(nodes, desc_contains="Matches")
     # Prefer bottom-nav Matches over any in-content control with similar desc.
     nav_matches = [node for node in matches if node.bounds[1] > int(height * 0.88)]
@@ -227,19 +238,19 @@ def open_matches(device, width: int, height: int) -> None:
                 int(height * 0.99),
             ),
         )
-    time.sleep(2)
+    time.sleep(max(0.35, float(settle_s)))
 
 
-def press_back(device) -> None:
+def press_back(device, *, settle_s: float = 0.55) -> None:
     # Prefer the system Back key. Tapping a "Back" content-desc outside Hinge
     # (Honor Settings / search) keeps us trapped in system UI.
     device.shell("input keyevent 4")
-    time.sleep(1.0)
+    time.sleep(max(0.25, float(settle_s)))
     xml_text = dump_ui_xml(device)
     if is_hinge_xml(xml_text):
         return
     # Still off-app: one more Back, then force Hinge open.
     device.shell("input keyevent 4")
-    time.sleep(0.8)
+    time.sleep(0.45)
     if not is_hinge_xml(dump_ui_xml(device)):
         ensure_hinge_foreground(device)

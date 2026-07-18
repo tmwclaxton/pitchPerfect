@@ -92,6 +92,8 @@ cd app
 ../.venv/bin/python sync_chats.py                          # ALL Matches chats + profiles -> SQLite
 ../.venv/bin/python sync_chats.py --max-chats 5            # smoke sync
 ../.venv/bin/python sync_chats.py --skip-profile           # chats only
+../.venv/bin/python sync_chats.py --force                  # re-scrape even if fresh in DB
+../.venv/bin/python sync_chats.py --fresh-hours 12         # skip matches synced in last 12h
 ../.venv/bin/python draft_replies.py --sync-history        # same as sync_chats
 ../.venv/bin/python draft_replies.py --init-style --from-db  # learn style from SQLite (no phone)
 ../.venv/bin/python draft_replies.py --init-style          # re-scrape Matches on device, then learn

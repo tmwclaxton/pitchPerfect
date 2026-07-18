@@ -353,8 +353,10 @@ def collect_chat_history(
     height: int,
     name: str,
     *,
-    max_scrolls: int = 12,
+    max_scrolls: int = 8,
     stagnant_limit: int = 2,
+    settle_bottom: bool = True,
+    scroll_pause_s: float = 0.65,
 ) -> ConversationHistory:
     """Scroll upward through a chat and reconstruct oldest→newest history."""
     ordered: List[ChatMessage] = []
@@ -386,12 +388,12 @@ def collect_chat_history(
         swipe(
             device,
             width // 2,
-            int(height * 0.35),
+            int(height * 0.32),
             width // 2,
-            int(height * 0.75),
-            350,
+            int(height * 0.78),
+            280,
         )
-        time.sleep(1.2)
+        time.sleep(max(0.35, float(scroll_pause_s)))
         added = ingest_screen()
         if added == 0:
             stagnant += 1
@@ -401,23 +403,30 @@ def collect_chat_history(
             stagnant = 0
 
     # Scroll back to the latest messages so the composer is usable.
-    for _ in range(3):
-        swipe(
-            device,
-            width // 2,
-            int(height * 0.75),
-            width // 2,
-            int(height * 0.35),
-            300,
-        )
-        time.sleep(0.6)
+    # Sync often opens Profile next — skip this when settle_bottom=False.
+    if settle_bottom:
+        for _ in range(2):
+            swipe(
+                device,
+                width // 2,
+                int(height * 0.75),
+                width // 2,
+                int(height * 0.35),
+                250,
+            )
+            time.sleep(0.35)
 
     return ConversationHistory(name=name, messages=ordered)
 
 
-def open_conversation(device, conversation: ConversationPreview) -> None:
+def open_conversation(
+    device,
+    conversation: ConversationPreview,
+    *,
+    settle_s: float = 1.2,
+) -> None:
     tap_bounds(device, conversation.bounds)
-    time.sleep(2.5)
+    time.sleep(max(0.4, float(settle_s)))
 
 
 def _composer_text(device) -> str:

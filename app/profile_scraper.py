@@ -106,7 +106,7 @@ def open_profile_tab(device) -> bool:
     # Right-hand tab is usually the widest / rightmost Profile label.
     candidates.sort(key=lambda n: n.bounds[0], reverse=True)
     tap_bounds(device, candidates[0].bounds)
-    time.sleep(2.0)
+    time.sleep(1.0)
     return True
 
 
@@ -121,7 +121,7 @@ def open_chat_tab(device) -> bool:
         return False
     candidates.sort(key=lambda n: n.bounds[0])
     tap_bounds(device, candidates[0].bounds)
-    time.sleep(1.2)
+    time.sleep(0.7)
     return True
 
 
@@ -287,9 +287,10 @@ def collect_profile_fields(
     height: int,
     match_name: str = "",
     *,
-    max_scrolls: int = 16,
-    stagnant_limit: int = 3,
-    min_scrolls: int = 8,
+    max_scrolls: int = 10,
+    stagnant_limit: int = 2,
+    min_scrolls: int = 3,
+    scroll_pause_s: float = 0.65,
 ) -> List[ProfileField]:
     """
     Open Profile tab (if needed), scroll through the profile, return all fields.
@@ -300,51 +301,54 @@ def collect_profile_fields(
         print("  profile scrape skipped: not in Hinge")
         return []
 
-    opened = open_profile_tab(device)
-    xml_text = dump_ui_xml(device)
-    if not is_hinge_xml(xml_text):
-        print("  profile scrape skipped: left Hinge opening Profile tab")
-        return []
+    # Reuse the first dump when Profile is already active (avoids an extra dump).
     nodes = parse_ui_nodes(xml_text)
+    opened = False
     if not _profile_tab_active(nodes):
-        # Retry once — sometimes the first tap hits Chat chrome.
-        if opened:
-            open_profile_tab(device)
+        opened = open_profile_tab(device)
         xml_text = dump_ui_xml(device)
         if not is_hinge_xml(xml_text):
-            print("  profile scrape skipped: left Hinge after Profile retry")
+            print("  profile scrape skipped: left Hinge opening Profile tab")
             return []
         nodes = parse_ui_nodes(xml_text)
         if not _profile_tab_active(nodes):
-            print("  profile scrape skipped: Profile tab not active")
-            return []
+            # Retry once — sometimes the first tap hits Chat chrome.
+            if opened:
+                open_profile_tab(device)
+            xml_text = dump_ui_xml(device)
+            if not is_hinge_xml(xml_text):
+                print("  profile scrape skipped: left Hinge after Profile retry")
+                return []
+            nodes = parse_ui_nodes(xml_text)
+            if not _profile_tab_active(nodes):
+                print("  profile scrape skipped: Profile tab not active")
+                return []
 
-    # Nudge to top of profile content.
-    for _ in range(2):
-        swipe(
-            device,
-            width // 2,
-            int(height * 0.35),
-            width // 2,
-            int(height * 0.75),
-            280,
-        )
-        time.sleep(0.5)
+    # Single nudge toward top of profile content.
+    swipe(
+        device,
+        width // 2,
+        int(height * 0.35),
+        width // 2,
+        int(height * 0.75),
+        260,
+    )
+    time.sleep(0.35)
 
     ordered: List[ProfileField] = []
     seen: Set[str] = set()
     stagnant = 0
 
-    def ingest() -> Optional[int]:
-        xml_text = dump_ui_xml(device)
-        if not is_hinge_xml(xml_text):
+    def ingest(xml_override: Optional[str] = None) -> Optional[int]:
+        local_xml = xml_override if xml_override is not None else dump_ui_xml(device)
+        if not is_hinge_xml(local_xml):
             print("  profile scrape abort: left Hinge while scrolling")
             return None
-        nodes = parse_ui_nodes(xml_text)
+        local_nodes = parse_ui_nodes(local_xml)
         # Matches-list / Settings chrome can keep producing "new" captions forever.
-        if not _profile_tab_active(nodes) and not ordered:
+        if not _profile_tab_active(local_nodes) and not ordered:
             return None
-        batch = extract_profile_fields_from_nodes(nodes, match_name=match_name)
+        batch = extract_profile_fields_from_nodes(local_nodes, match_name=match_name)
         added = 0
         for field in batch:
             key = (
@@ -358,6 +362,7 @@ def collect_profile_fields(
             added += 1
         return added
 
+    # Ingest after the top nudge (one dump).
     first = ingest()
     if first is None:
         print("  profile scrape skipped: no Profile content visible")
@@ -367,12 +372,12 @@ def collect_profile_fields(
         swipe(
             device,
             width // 2,
-            int(height * 0.70),
+            int(height * 0.72),
             width // 2,
-            int(height * 0.38),
-            320,
+            int(height * 0.36),
+            280,
         )
-        time.sleep(1.15)
+        time.sleep(max(0.35, float(scroll_pause_s)))
         added = ingest()
         if added is None:
             break

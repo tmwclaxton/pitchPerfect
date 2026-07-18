@@ -8,7 +8,7 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from config import SQLITE_PATH
@@ -273,6 +273,51 @@ def get_match_by_name(match_name: str) -> Optional[Dict[str, Any]]:
             (name_key(match_name),),
         ).fetchone()
     return dict(row) if row else None
+
+
+def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        # Stored as utcnow().isoformat() — accept trailing Z too.
+        return datetime.fromisoformat(text.replace("Z", ""))
+    except ValueError:
+        return None
+
+
+def match_is_fresh(
+    match_name: str,
+    *,
+    require_profile: bool = True,
+    max_age_hours: float = 24.0,
+) -> bool:
+    """
+    True when this match was synced recently and already has messages
+    (and profile fields when require_profile).
+    """
+    row = get_match_by_name(match_name)
+    if not row:
+        return False
+    if int(row.get("message_count") or 0) <= 0:
+        return False
+    if require_profile and int(row.get("profile_field_count") or 0) <= 0:
+        return False
+    synced_at = _parse_iso_utc(row.get("last_synced_at"))
+    if require_profile:
+        profile_at = _parse_iso_utc(row.get("profile_synced_at"))
+        # Need both timestamps recent when profiles are required.
+        if synced_at is None or profile_at is None:
+            return False
+        oldest = min(synced_at, profile_at)
+    else:
+        if synced_at is None:
+            return False
+        oldest = synced_at
+    age = datetime.utcnow() - oldest
+    return age <= timedelta(hours=float(max_age_hours))
 
 
 def list_matches(limit: int = 500) -> List[Dict[str, Any]]:

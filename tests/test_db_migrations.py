@@ -6,12 +6,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
+from datetime import datetime, timedelta
+from unittest import mock
+
 from db import (
+    match_is_fresh,
     message_content_hash,
     sync_stats,
     upsert_match_history,
+    upsert_profile_fields,
 )
 from migrate import apply_migrations, migrate_db
+import db as db_module
 import sqlite3
 
 
@@ -135,6 +141,51 @@ class MigrationsAndUpsertTest(unittest.TestCase):
             ).fetchone()["c"]
             self.assertEqual(msg_count, 2)
             conn.close()
+
+    def test_match_is_fresh_skips_recent_full_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "t.db")
+            migrate_db(path)
+            with mock.patch.object(db_module, "SQLITE_PATH", path):
+                result = upsert_match_history(
+                    "Ada",
+                    [
+                        {"sender": "You", "text": "hey"},
+                        {"sender": "Ada", "text": "hi"},
+                    ],
+                )
+                upsert_profile_fields(
+                    result["match_id"],
+                    [
+                        {
+                            "field_type": "basic",
+                            "label": "Age",
+                            "text_content": "25",
+                        }
+                    ],
+                )
+                self.assertTrue(
+                    match_is_fresh("Ada", require_profile=True, max_age_hours=24)
+                )
+                self.assertFalse(
+                    match_is_fresh("Ada", require_profile=True, max_age_hours=0)
+                )
+                # Age the sync timestamps so it is no longer fresh.
+                old = (datetime.utcnow() - timedelta(hours=48)).isoformat()
+                conn = sqlite3.connect(path)
+                conn.execute(
+                    """
+                    UPDATE matches
+                    SET last_synced_at = ?, profile_synced_at = ?
+                    WHERE name_key = 'ada'
+                    """,
+                    (old, old),
+                )
+                conn.commit()
+                conn.close()
+                self.assertFalse(
+                    match_is_fresh("Ada", require_profile=True, max_age_hours=24)
+                )
 
 
 if __name__ == "__main__":
