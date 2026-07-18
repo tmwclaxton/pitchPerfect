@@ -295,15 +295,21 @@ def match_is_fresh(
     max_age_hours: float = 24.0,
 ) -> bool:
     """
-    True when this match was synced recently and already has messages
-    (and profile fields when require_profile).
+    True when this match was synced recently with usable coverage.
+
+    Empty chats (0 messages) still count as fresh when a profile was scraped
+    recently — otherwise every resume re-opens blank threads forever.
     """
     row = get_match_by_name(match_name)
     if not row:
         return False
-    if int(row.get("message_count") or 0) <= 0:
+    msg_count = int(row.get("message_count") or 0)
+    profile_count = int(row.get("profile_field_count") or 0)
+    if msg_count <= 0 and profile_count <= 0:
         return False
-    if require_profile and int(row.get("profile_field_count") or 0) <= 0:
+    if require_profile and profile_count <= 0:
+        return False
+    if msg_count <= 0 and not require_profile:
         return False
     synced_at = _parse_iso_utc(row.get("last_synced_at"))
     if require_profile:

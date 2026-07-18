@@ -82,15 +82,17 @@ def _ensure_matches_list(device, width: int, height: int, *, why: str) -> bool:
 def _scroll_matches_list(device, width: int, height: int) -> bool:
     if not _ensure_matches_list(device, width, height, why="before Matches list scroll"):
         return False
-    swipe(
-        device,
-        width // 2,
-        int(height * 0.78),
-        width // 2,
-        int(height * 0.35),
-        350,
-    )
-    time.sleep(0.25)
+    # Longer, slower fling so Hinge actually advances past the current page.
+    for _ in range(2):
+        swipe(
+            device,
+            width // 2,
+            int(height * 0.82),
+            width // 2,
+            int(height * 0.22),
+            420,
+        )
+        time.sleep(0.35)
     return True
 
 
@@ -427,7 +429,7 @@ def run_capture(
     list_page = int(run.meta.get("list_page") or 0)
 
     try:
-        while len(captured_names) < max_chats and stagnant_pages < 8:
+        while len(captured_names) < max_chats and stagnant_pages < 12:
             if not _ensure_matches_list(
                 device, width, height, why="before listing Matches"
             ):
@@ -482,6 +484,8 @@ def run_capture(
                     print(
                         f"\n=== defer (under bottom nav): {conversation.name} ==="
                     )
+                    # Still counts as list progress so we keep scrolling.
+                    page_new += 1
                     continue
                 seen_names.add(key)
 
