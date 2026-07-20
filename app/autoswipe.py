@@ -70,24 +70,20 @@ def _first_desc(nodes, *needles: str):
     return None
 
 
-def _like_photo_node(nodes, *, prefer_photo: bool):
-    """
-    Prefer a real photo heart ('Like photo') over prompt likes when commenting
-    on the best-scored image.
-    """
+def _like_photo_nodes(nodes):
+    """Split Like controls into real photo hearts vs prompt hearts."""
     matches = find_nodes(nodes, desc_contains="Like photo")
-    if not matches:
-        return None
     photos = [
         n
         for n in matches
         if "prompt" not in (n.content_desc or "").lower()
     ]
-    if prefer_photo and photos:
-        return photos[0]
-    if photos:
-        return photos[0]
-    return matches[0]
+    prompts = [
+        n
+        for n in matches
+        if "prompt" in (n.content_desc or "").lower()
+    ]
+    return photos, prompts
 
 
 def _find_like_button(
@@ -102,27 +98,39 @@ def _find_like_button(
     Locate Like photo / Like photo prompt on the current profile card.
 
     When prefer_photo is set (best-image targeting), keep hunts small so we do
-    not scroll away from the chosen photo. Otherwise reverse-scroll a few times
-    after deep image collection so a heart control is on-screen again.
+    not scroll away from the chosen photo, and only fall back to a prompt like
+    on the last attempt. Otherwise reverse-scroll a few times after deep image
+    collection so a heart control is on-screen again.
     """
     x = width // 2
     hunts = max(1, int(max_hunt))
+    prompt_fallback = None
     for attempt in range(hunts):
         nodes = _discover_nodes(device)
-        like_btn = _like_photo_node(nodes, prefer_photo=prefer_photo)
-        if like_btn is not None:
-            return like_btn
+        photos, prompts = _like_photo_nodes(nodes)
+        if photos:
+            return photos[0]
+        if prompts and prompt_fallback is None:
+            prompt_fallback = prompts[0]
+        if not prefer_photo and (photos or prompts):
+            return (photos or prompts)[0]
         if hunts == 1:
             break
         # Small local nudge when locked to a photo; broader recovery otherwise.
         if prefer_photo:
-            swipe(device, x, int(height * 0.55), x, int(height * 0.40), 220)
+            # Alternate slight up/down to keep the chosen card in view.
+            if attempt % 2 == 0:
+                swipe(device, x, int(height * 0.58), x, int(height * 0.42), 220)
+            else:
+                swipe(device, x, int(height * 0.42), x, int(height * 0.58), 220)
         elif attempt < 4:
             swipe(device, x, int(height * 0.28), x, int(height * 0.78), 280)
         else:
             swipe(device, x, int(height * 0.78), x, int(height * 0.28), 280)
         time.sleep(0.85)
-    return None
+    if prefer_photo and prompt_fallback is not None:
+        return prompt_fallback
+    return prompt_fallback
 
 
 def _type_discover_like_comment(device, comment: str) -> bool:
