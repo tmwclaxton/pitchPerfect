@@ -118,7 +118,9 @@ class NanoGptServiceTest(unittest.TestCase):
         self.assertEqual(6, result["attractiveness"])
         user_content = session.request["json"]["messages"][1]["content"]
         self.assertEqual("text", user_content[0]["type"])
-        self.assertTrue(user_content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+        self.assertTrue(
+            user_content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+        )
 
 
 if __name__ == "__main__":

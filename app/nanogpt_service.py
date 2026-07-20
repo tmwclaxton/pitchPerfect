@@ -138,14 +138,47 @@ class NanoGptService:
         response.raise_for_status()
         return response.json()
 
-    def _image_data_uri(self, image_path: str) -> str:
+    def _image_data_uri(
+        self,
+        image_path: str,
+        *,
+        max_side: int = 1024,
+        jpeg_quality: int = 75,
+    ) -> str:
+        """
+        Encode an image as a data URI, downscaling/compressing to avoid
+        NanoGPT 413 Request Entity Too Large on multi-photo vision calls.
+        """
         path = Path(image_path)
         if not path.is_file():
             raise FileNotFoundError(f"Image not found: {image_path}")
 
-        mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-        return f"data:{mime_type};base64,{encoded}"
+        try:
+            from io import BytesIO
+
+            from PIL import Image
+
+            with Image.open(path) as image:
+                rgb = image.convert("RGB")
+                width, height = rgb.size
+                longest = max(width, height)
+                if longest > max_side:
+                    scale = max_side / float(longest)
+                    rgb = rgb.resize(
+                        (max(1, int(width * scale)), max(1, int(height * scale))),
+                        Image.Resampling.LANCZOS
+                        if hasattr(Image, "Resampling")
+                        else Image.LANCZOS,
+                    )
+                buffer = BytesIO()
+                rgb.save(buffer, format="JPEG", quality=jpeg_quality, optimize=True)
+                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+            return f"data:image/jpeg;base64,{encoded}"
+        except Exception:
+            # Fall back to raw file bytes if Pillow cannot process the image.
+            mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            return f"data:{mime_type};base64,{encoded}"
 
     def _decode_json_content(self, content: str) -> Optional[Dict[str, Any]]:
         stripped = content.strip()
