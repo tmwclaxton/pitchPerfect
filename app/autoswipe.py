@@ -44,6 +44,69 @@ from profile_scorer import (
     vision_failure_scores,
 )
 from prompt_engine import update_template_weights
+from ui_dump import dump_ui_xml, find_nodes, parse_ui_nodes, press_back, tap_bounds
+
+
+def _discover_nodes(device):
+    return parse_ui_nodes(dump_ui_xml(device))
+
+
+def _first_desc(nodes, *needles: str):
+    """First node whose content-desc contains any needle (case-insensitive)."""
+    for needle in needles:
+        matches = find_nodes(nodes, desc_contains=needle)
+        if matches:
+            return matches[0]
+    return None
+
+
+def tap_discover_like(device, width: int, height: int) -> bool:
+    """
+    Like the current Discover profile via accessibility targets.
+
+    Hardcoded % taps miss the heart on tall devices; Hinge also requires
+    confirming with "Send like" after opening the like sheet.
+    Never auto-sends chat messages — only the Discover like action.
+    """
+    nodes = _discover_nodes(device)
+    like_btn = _first_desc(nodes, "Like photo", "Like photo prompt")
+    if like_btn is not None:
+        tap_bounds(device, like_btn.bounds)
+        print(f"Like tapped via UI: {like_btn.content_desc} {like_btn.bounds}")
+    else:
+        x, y = int(width * 0.90), int(height * 0.67)
+        tap(device, x, y)
+        print(f"Like tapped at fallback coords: {x}, {y}")
+
+    time.sleep(1.2)
+    nodes = _discover_nodes(device)
+    send = _first_desc(nodes, "Send like")
+    if send is None:
+        print("Warning: Send like not found after like tap; pressing back.")
+        press_back(device, settle_s=0.4, check_hinge=False)
+        return False
+
+    tap_bounds(device, send.bounds)
+    print(f"Send like tapped: {send.bounds}")
+    time.sleep(1.2)
+    return True
+
+
+def tap_discover_pass(device, width: int, height: int) -> bool:
+    """Pass/skip the current Discover profile via Skip button when available."""
+    nodes = _discover_nodes(device)
+    skip = _first_desc(nodes, "Skip ")
+    if skip is not None:
+        tap_bounds(device, skip.bounds)
+        print(f"Pass tapped via UI: {skip.content_desc} {skip.bounds}")
+        time.sleep(1.0)
+        return True
+
+    x, y = int(width * 0.15), int(height * 0.85)
+    tap(device, x, y)
+    print(f"Pass tapped at fallback coords: {x}, {y}")
+    time.sleep(1.0)
+    return False
 
 
 def run_autoswipe(
@@ -68,11 +131,6 @@ def run_autoswipe(
 
     ensure_images_dir()
     width, height = get_screen_resolution(device)
-
-    x_like_button = int(width * 0.90)
-    y_like_button = int(height * 0.67)
-    x_dislike_button = int(width * 0.15)
-    y_dislike_button = int(height * 0.85)
 
     open_hinge(device=device)
     open_discover(device, width, height)
@@ -162,18 +220,15 @@ def run_autoswipe(
                 else:
                     print("Like without pasting a comment (--no-paste).")
 
-                tap(device, x_like_button, y_like_button)
-                print("Like tapped at:", x_like_button, y_like_button)
-                # Comment paste into Hinge like composer is best-effort / optional;
-                # we never auto-send chat messages.
+                # UI like + Send like; comment text is stored locally only.
+                tap_discover_like(device, width, height)
             else:
                 passed += 1
                 print(f"Pass — {decision_reason}")
-                tap(device, x_dislike_button, y_dislike_button)
-                print("Pass tapped at:", x_dislike_button, y_dislike_button)
+                tap_discover_pass(device, width, height)
 
             previous_profile_text = current_profile_text
-            time.sleep(2)
+            time.sleep(1.0)
     finally:
         finish_run(
             run_id,
