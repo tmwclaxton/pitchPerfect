@@ -32,6 +32,7 @@ from helper_functions import (
     extract_text_from_image,
     generate_comment,
     get_screen_resolution,
+    input_text,
     open_discover,
     open_hinge,
     swipe,
@@ -46,6 +47,9 @@ from profile_scorer import (
 )
 from prompt_engine import update_template_weights
 from ui_dump import dump_ui_xml, find_nodes, parse_ui_nodes, press_back, tap_bounds
+
+# Discover like-with-comment text (not Matches chat — never auto-sends replies).
+DISCOVER_LIKE_COMMENT = "cutie x"
 
 
 def _discover_nodes(device):
@@ -83,13 +87,38 @@ def _find_like_button(device, width: int, height: int):
     return None
 
 
-def tap_discover_like(device, width: int, height: int) -> bool:
+def _type_discover_like_comment(device, comment: str) -> bool:
+    """Focus Edit comment on the Discover like sheet and type `comment`."""
+    nodes = _discover_nodes(device)
+    edit = _first_desc(nodes, "Edit comment")
+    if edit is None:
+        print("Warning: Edit comment not found on like sheet.")
+        return False
+    tap_bounds(device, edit.bounds)
+    time.sleep(0.35)
+    # Clear any leftover draft, then type.
+    device.shell("input keycombination 113 29")  # Ctrl+A
+    time.sleep(0.08)
+    device.shell("input keyevent 67")  # DEL
+    time.sleep(0.1)
+    input_text(device, comment)
+    time.sleep(0.35)
+    print(f"Typed Discover like comment: {comment!r}")
+    return True
+
+
+def tap_discover_like(
+    device,
+    width: int,
+    height: int,
+    *,
+    comment: str = DISCOVER_LIKE_COMMENT,
+) -> bool:
     """
     Like the current Discover profile via accessibility targets.
 
-    Hardcoded % taps miss the heart on tall devices; Hinge also requires
-    confirming with "Send like" after opening the like sheet.
-    Never auto-sends chat messages — only the Discover like action.
+    Opens the like sheet, types the Discover like comment, then Send like.
+    Never auto-sends Matches chat replies — Discover like-with-comment only.
     """
     like_btn = _find_like_button(device, width, height)
     if like_btn is not None:
@@ -112,6 +141,11 @@ def tap_discover_like(device, width: int, height: int) -> bool:
         print("Warning: Send like not found after like tap; pressing back.")
         press_back(device, settle_s=0.4, check_hinge=False)
         return False
+
+    if comment:
+        _type_discover_like_comment(device, comment)
+        nodes = _discover_nodes(device)
+        send = _first_desc(nodes, "Send like") or send
 
     tap_bounds(device, send.bounds)
     print(f"Send like tapped: {send.bounds}")
@@ -241,27 +275,27 @@ def run_autoswipe(
 
             if like_profile:
                 liked += 1
-                comment = None
+                # Discover likes always send DISCOVER_LIKE_COMMENT on the like sheet.
+                # Matches chat replies are never auto-sent.
+                ui_comment = DISCOVER_LIKE_COMMENT
                 if do_paste:
-                    comment = generate_comment(
+                    # Optional local-only vision note (not typed into Hinge).
+                    generated = generate_comment(
                         current_profile_text,
                         vision_notes=format_scores_for_comment(scores),
-                    ) or "Hey, I'd love to meet up!"
-                    print(f"Generated Comment: {comment}")
-                    store_generated_comment(
-                        comment_id=comment_id,
-                        profile_text=current_profile_text,
-                        generated_comment=comment,
-                        style_used="vision",
-                        profile_scores=scores,
-                        decision=decision,
-                        image_paths=image_paths,
                     )
-                else:
-                    print("Like without pasting a comment (--no-paste).")
-
-                # UI like + Send like; comment text is stored locally only.
-                tap_discover_like(device, width, height)
+                    if generated:
+                        print(f"Generated Comment (local only): {generated}")
+                store_generated_comment(
+                    comment_id=comment_id,
+                    profile_text=current_profile_text,
+                    generated_comment=ui_comment,
+                    style_used="discover_like",
+                    profile_scores=scores,
+                    decision=decision,
+                    image_paths=image_paths,
+                )
+                tap_discover_like(device, width, height, comment=ui_comment)
             else:
                 passed += 1
                 print(f"Pass — {decision_reason}")
@@ -306,12 +340,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--paste",
         action="store_true",
         default=None,
-        help="Generate/store a like comment (never auto-sends chats).",
+        help="Also generate/store a vision comment locally (Discover UI still uses cutie x).",
     )
     parser.add_argument(
         "--no-paste",
         action="store_true",
-        help="Like/pass only; skip comment generation.",
+        help="Skip local vision comment generation (Discover likes still send cutie x).",
     )
     parser.add_argument(
         "--show-settings",
