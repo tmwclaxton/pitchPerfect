@@ -13,7 +13,8 @@ PROFILE_SCORE_SYSTEM_PROMPT = (
     "quirkiness = distinctive style, personality, or vibe in photos; "
     "ethnicity_fit = how well the person matches the stated ethnicity "
     "preference (use 5 if no preference was given); "
-    "notes = one short sentence summarizing the person's look and vibe."
+    "notes = one short sentence summarizing the person's look and vibe. "
+    "Also score each image individually so the best photo can be liked."
 )
 
 # Like when composite is within this distance below min_composite ("near threshold").
@@ -31,28 +32,131 @@ def _user_prompt(settings: AutoswipeSettings) -> str:
         else "No ethnicity preference — set ethnicity_fit to 5."
     )
     return (
-        "These are consecutive screenshots from one dating profile. "
+        "These are consecutive screenshots from one dating profile, "
+        "ordered top-to-bottom as captured (index 0 is the first/top photo). "
         "Ignore app chrome and focus on the person in the photos. "
         f"{ethnicity_line} "
         "Return JSON with keys: attractiveness, slimness, quirkiness, "
-        "ethnicity_fit, notes. "
+        "ethnicity_fit, notes, image_scores, best_image_index. "
+        "Overall scores (attractiveness/slimness/quirkiness/ethnicity_fit) "
+        "reflect the whole profile. "
+        "image_scores must be an array with one object per image in order: "
+        '{"index": 0, "attractiveness": 1-10} (include every image). '
+        "best_image_index is the 0-based index of the single best photo to "
+        "leave a like-comment on — highest attractiveness; if tied, prefer "
+        "the clearest face / main portrait (usually the lower index). "
         "Each score must be an integer from 1 to 10."
     )
 
 
-def normalize_profile_scores(raw_scores: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_image_scores(
+    raw_scores: Dict[str, Any],
+    image_count: int,
+) -> List[Dict[str, Any]]:
+    """Normalize per-image attractiveness rows; pad/truncate to image_count."""
+    raw_list = raw_scores.get("image_scores") or raw_scores.get("imageScores") or []
+    by_index: Dict[int, int] = {}
+
+    if isinstance(raw_list, list):
+        for offset, entry in enumerate(raw_list):
+            if isinstance(entry, dict):
+                try:
+                    idx = int(entry.get("index", offset))
+                except (TypeError, ValueError):
+                    idx = offset
+                attr = entry.get("attractiveness", entry.get("score"))
+            else:
+                idx = offset
+                attr = entry
+            if 0 <= idx < image_count:
+                by_index[idx] = _normalize_score(attr, default=5)
+
+    overall_attr = _normalize_score(raw_scores.get("attractiveness"), default=5)
+    rows: List[Dict[str, Any]] = []
+    for idx in range(max(0, image_count)):
+        rows.append(
+            {
+                "index": idx,
+                "attractiveness": by_index.get(idx, overall_attr),
+            }
+        )
+    return rows
+
+
+def pick_best_image_index(
+    scores: Dict[str, Any],
+    image_count: int,
+) -> int:
+    """
+    Choose the photo index for Discover like-with-comment.
+
+    Prefer explicit best_image_index when in range; else highest per-image
+    attractiveness (ties → lower index / top photo).
+    """
+    if image_count <= 0:
+        return 0
+
+    explicit = scores.get("best_image_index")
+    if explicit is None:
+        explicit = scores.get("bestImageIndex")
+    if explicit is not None:
+        try:
+            idx = int(explicit)
+            if 0 <= idx < image_count:
+                return idx
+        except (TypeError, ValueError):
+            pass
+
+    image_scores = scores.get("image_scores") or []
+    best_idx = 0
+    best_attr = -1
+    for entry in image_scores:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            idx = int(entry.get("index", 0))
+            attr = int(entry.get("attractiveness", 0))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < image_count and attr > best_attr:
+            best_attr = attr
+            best_idx = idx
+
+    if best_attr < 0:
+        return 0
+    return best_idx
+
+
+def normalize_profile_scores(
+    raw_scores: Dict[str, Any],
+    *,
+    image_count: int = 0,
+) -> Dict[str, Any]:
     notes = raw_scores.get("notes", "")
     if not isinstance(notes, str):
         notes = str(notes)
 
     ethnicity = raw_scores.get("ethnicity_fit", raw_scores.get("ethnicityFit", 5))
-    return {
+    count = int(image_count or 0)
+    image_scores = normalize_image_scores(raw_scores, count) if count else []
+    normalized = {
         "attractiveness": _normalize_score(raw_scores.get("attractiveness")),
         "slimness": _normalize_score(raw_scores.get("slimness")),
         "quirkiness": _normalize_score(raw_scores.get("quirkiness")),
         "ethnicity_fit": _normalize_score(ethnicity, default=5),
         "notes": notes.strip(),
+        "image_scores": image_scores,
     }
+    if count:
+        # Seed best from model before pick runs (pick also reads image_scores).
+        if "best_image_index" in raw_scores or "bestImageIndex" in raw_scores:
+            normalized["best_image_index"] = raw_scores.get(
+                "best_image_index", raw_scores.get("bestImageIndex")
+            )
+        normalized["best_image_index"] = pick_best_image_index(normalized, count)
+    else:
+        normalized["best_image_index"] = 0
+    return normalized
 
 
 def compute_composite_score(
@@ -98,19 +202,24 @@ def score_profile_images(
         image_paths=image_paths,
         system_prompt=PROFILE_SCORE_SYSTEM_PROMPT,
         temperature=0.2,
-        max_tokens=300,
+        max_tokens=500,
         model=NANOGPT_VISION_MODEL,
         json_response=True,
     )
-    scores = normalize_profile_scores(raw_scores)
+    scores = normalize_profile_scores(raw_scores, image_count=len(image_paths))
     scores["composite"] = compute_composite_score(scores, cfg)
     scores["uncertain"] = False
     scores["vision_failed"] = False
     return scores
 
 
-def vision_failure_scores(reason: str = "Vision scoring failed") -> Dict[str, Any]:
+def vision_failure_scores(
+    reason: str = "Vision scoring failed",
+    *,
+    image_count: int = 0,
+) -> Dict[str, Any]:
     """Placeholder scores that bias the swipe decision to LIKE."""
+    count = max(0, int(image_count or 0))
     return {
         "attractiveness": 0,
         "slimness": 0,
@@ -120,6 +229,10 @@ def vision_failure_scores(reason: str = "Vision scoring failed") -> Dict[str, An
         "notes": reason,
         "uncertain": True,
         "vision_failed": True,
+        "image_scores": [
+            {"index": i, "attractiveness": 0} for i in range(count)
+        ],
+        "best_image_index": 0,
     }
 
 

@@ -10,6 +10,7 @@ from profile_scorer import (
     compute_composite_score,
     format_scores_for_comment,
     normalize_profile_scores,
+    pick_best_image_index,
     score_profile_images,
     should_like_profile,
 )
@@ -27,16 +28,13 @@ class ProfileScorerTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(
-            {
-                "attractiveness": 9,
-                "slimness": 10,
-                "quirkiness": 1,
-                "ethnicity_fit": 10,
-                "notes": "Bright outdoor photos",
-            },
-            scores,
-        )
+        self.assertEqual(9, scores["attractiveness"])
+        self.assertEqual(10, scores["slimness"])
+        self.assertEqual(1, scores["quirkiness"])
+        self.assertEqual(10, scores["ethnicity_fit"])
+        self.assertEqual("Bright outdoor photos", scores["notes"])
+        self.assertEqual([], scores["image_scores"])
+        self.assertEqual(0, scores["best_image_index"])
 
     def test_compute_composite_score_weighted(self):
         settings = AutoswipeSettings(
@@ -115,6 +113,11 @@ class ProfileScorerTest(unittest.TestCase):
                     "quirkiness": 6,
                     "ethnicity_fit": 9,
                     "notes": "Stylish and relaxed",
+                    "image_scores": [
+                        {"index": 0, "attractiveness": 6},
+                        {"index": 1, "attractiveness": 9},
+                    ],
+                    "best_image_index": 1,
                 }
 
         fake_service = FakeNanoGpt()
@@ -133,11 +136,41 @@ class ProfileScorerTest(unittest.TestCase):
 
         self.assertEqual(8, scores["attractiveness"])
         self.assertIn("composite", scores)
+        self.assertEqual(1, scores["best_image_index"])
+        self.assertEqual(
+            [
+                {"index": 0, "attractiveness": 6},
+                {"index": 1, "attractiveness": 9},
+            ],
+            scores["image_scores"],
+        )
         self.assertTrue(fake_service.kwargs["json_response"])
         self.assertIn("East/Southeast Asian", fake_service.kwargs["prompt"])
+        self.assertIn("best_image_index", fake_service.kwargs["prompt"])
         self.assertEqual(
             ["images/a.png", "images/b.png"], fake_service.kwargs["image_paths"]
         )
+
+    def test_pick_best_image_index_uses_attractiveness(self):
+        scores = {
+            "image_scores": [
+                {"index": 0, "attractiveness": 7},
+                {"index": 1, "attractiveness": 9},
+                {"index": 2, "attractiveness": 8},
+            ]
+        }
+        self.assertEqual(1, pick_best_image_index(scores, 3))
+
+        # Explicit wins when in range.
+        scores["best_image_index"] = 2
+        self.assertEqual(2, pick_best_image_index(scores, 3))
+
+        # Out-of-range explicit falls back to highest attractiveness.
+        scores["best_image_index"] = 99
+        self.assertEqual(1, pick_best_image_index(scores, 3))
+
+        # Missing per-image scores → top photo.
+        self.assertEqual(0, pick_best_image_index({}, 3))
 
     def test_format_scores_for_comment(self):
         text = format_scores_for_comment(

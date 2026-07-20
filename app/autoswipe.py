@@ -38,10 +38,15 @@ from helper_functions import (
     swipe,
     tap,
 )
-from profile_images import collect_profile_images, ensure_images_dir
+from profile_images import (
+    collect_profile_images,
+    ensure_images_dir,
+    navigate_to_profile_image,
+)
 from profile_scorer import (
     format_scores_for_comment,
     like_decision_reason,
+    pick_best_image_index,
     score_profile_images,
     vision_failure_scores,
 )
@@ -65,21 +70,54 @@ def _first_desc(nodes, *needles: str):
     return None
 
 
-def _find_like_button(device, width: int, height: int):
+def _like_photo_node(nodes, *, prefer_photo: bool):
     """
-    Locate Like photo / Like photo prompt after profile image collection.
+    Prefer a real photo heart ('Like photo') over prompt likes when commenting
+    on the best-scored image.
+    """
+    matches = find_nodes(nodes, desc_contains="Like photo")
+    if not matches:
+        return None
+    photos = [
+        n
+        for n in matches
+        if "prompt" not in (n.content_desc or "").lower()
+    ]
+    if prefer_photo and photos:
+        return photos[0]
+    if photos:
+        return photos[0]
+    return matches[0]
 
-    collect_profile_images scrolls deep into the stack; reverse-scroll a few
-    times so a heart control is on-screen again.
+
+def _find_like_button(
+    device,
+    width: int,
+    height: int,
+    *,
+    prefer_photo: bool = False,
+    max_hunt: int = 7,
+):
+    """
+    Locate Like photo / Like photo prompt on the current profile card.
+
+    When prefer_photo is set (best-image targeting), keep hunts small so we do
+    not scroll away from the chosen photo. Otherwise reverse-scroll a few times
+    after deep image collection so a heart control is on-screen again.
     """
     x = width // 2
-    for attempt in range(7):
+    hunts = max(1, int(max_hunt))
+    for attempt in range(hunts):
         nodes = _discover_nodes(device)
-        like_btn = _first_desc(nodes, "Like photo", "Like photo prompt")
+        like_btn = _like_photo_node(nodes, prefer_photo=prefer_photo)
         if like_btn is not None:
             return like_btn
-        # First recover upward (finger swipe down), then hunt downward.
-        if attempt < 4:
+        if hunts == 1:
+            break
+        # Small local nudge when locked to a photo; broader recovery otherwise.
+        if prefer_photo:
+            swipe(device, x, int(height * 0.55), x, int(height * 0.40), 220)
+        elif attempt < 4:
             swipe(device, x, int(height * 0.28), x, int(height * 0.78), 280)
         else:
             swipe(device, x, int(height * 0.78), x, int(height * 0.28), 280)
@@ -113,14 +151,43 @@ def tap_discover_like(
     height: int,
     *,
     comment: str = DISCOVER_LIKE_COMMENT,
+    best_image_index: int | None = None,
+    target_depth: int | None = None,
+    current_depth: int | None = None,
 ) -> bool:
     """
     Like the current Discover profile via accessibility targets.
 
-    Opens the like sheet, types the Discover like comment, then Send like.
-    Never auto-sends Matches chat replies — Discover like-with-comment only.
+    When best_image_index/target_depth are set, scroll back to that captured
+    photo first so the like-comment lands on the highest-scored image (not
+    whatever frame is left after collection). Opens the like sheet, types the
+    Discover like comment, then Send like. Never auto-sends Matches chat replies.
     """
-    like_btn = _find_like_button(device, width, height)
+    targeting_best = (
+        best_image_index is not None
+        and target_depth is not None
+        and current_depth is not None
+    )
+    if targeting_best:
+        landed = navigate_to_profile_image(
+            device,
+            width,
+            height,
+            target_depth=int(target_depth),
+            current_depth=int(current_depth),
+        )
+        print(
+            f"Navigated to best photo index {best_image_index} "
+            f"(scroll depth {landed}) before like-comment"
+        )
+
+    like_btn = _find_like_button(
+        device,
+        width,
+        height,
+        prefer_photo=bool(targeting_best),
+        max_hunt=3 if targeting_best else 7,
+    )
     if like_btn is not None:
         tap_bounds(device, like_btn.bounds)
         print(f"Like tapped via UI: {like_btn.content_desc} {like_btn.bounds}")
@@ -228,7 +295,7 @@ def run_autoswipe(
     try:
         for index in range(swipes):
             print(f"\n--- Profile {index + 1}/{swipes} ---")
-            image_paths = collect_profile_images(
+            image_paths, capture_depths, final_depth = collect_profile_images(
                 device,
                 width,
                 height,
@@ -248,7 +315,23 @@ def run_autoswipe(
                 scores = score_profile_images(image_paths, settings=settings)
             except Exception as exception:
                 print(f"Vision scoring failed: {exception}")
-                scores = vision_failure_scores(f"Vision scoring failed: {exception}")
+                scores = vision_failure_scores(
+                    f"Vision scoring failed: {exception}",
+                    image_count=len(image_paths),
+                )
+
+            best_idx = pick_best_image_index(scores, len(image_paths))
+            scores["best_image_index"] = best_idx
+            if capture_depths and 0 <= best_idx < len(capture_depths):
+                best_depth = int(capture_depths[best_idx])
+            else:
+                best_depth = 0
+            per_image = scores.get("image_scores") or []
+            per_image_bits = ", ".join(
+                f"{row.get('index')}:{row.get('attractiveness')}"
+                for row in per_image
+                if isinstance(row, dict)
+            )
 
             print(
                 "Vision scores =>",
@@ -257,6 +340,9 @@ def run_autoswipe(
                 f"slimness={scores['slimness']},",
                 f"quirkiness={scores['quirkiness']},",
                 f"ethnicity_fit={scores.get('ethnicity_fit')},",
+                f"best_image_index={best_idx}",
+                f"best_depth={best_depth}",
+                f"image_attractiveness=[{per_image_bits}]",
                 f"notes={scores['notes']}",
             )
 
@@ -295,7 +381,15 @@ def run_autoswipe(
                     decision=decision,
                     image_paths=image_paths,
                 )
-                tap_discover_like(device, width, height, comment=ui_comment)
+                tap_discover_like(
+                    device,
+                    width,
+                    height,
+                    comment=ui_comment,
+                    best_image_index=best_idx,
+                    target_depth=best_depth,
+                    current_depth=final_depth,
+                )
             else:
                 passed += 1
                 print(f"Pass — {decision_reason}")
