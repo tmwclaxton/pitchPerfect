@@ -43,11 +43,11 @@ class AutoswipeSettings:
     # Soft preference for vision scoring (not a Hinge API filter).
     # Example: "East/Southeast Asian". Empty = no ethnicity scoring boost.
     ethnicity_preference: str = ""
-    # Documented Hinge Filters note; setup prints this — ADB filter UI is fragile.
+    # Hinge UI filter path is automated via hinge_filters.py / --apply-filters.
     hinge_filters_note: str = (
-        "Set Hinge Discover Filters manually once (ethnicity/race if available "
-        "in your region). Automation persists the preference for vision scoring "
-        "and like/pass decisions; it does not reliably drive Hinge's Filters UI."
+        "Hinge Ethnicity is set on-device: Discover → Dating preferences → Ethnicity. "
+        "Run: python setup_autoswipe.py --apply-filters "
+        "(asian_baddies → East Asian + Southeast Asian)."
     )
 
     def to_dict(self) -> Dict[str, Any]:

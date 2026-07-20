@@ -39,8 +39,9 @@ from helper_functions import (
 from profile_images import collect_profile_images, ensure_images_dir
 from profile_scorer import (
     format_scores_for_comment,
+    like_decision_reason,
     score_profile_images,
-    should_like_profile,
+    vision_failure_scores,
 )
 from prompt_engine import update_template_weights
 
@@ -115,14 +116,7 @@ def run_autoswipe(
                 scores = score_profile_images(image_paths, settings=settings)
             except Exception as exception:
                 print(f"Vision scoring failed: {exception}")
-                scores = {
-                    "attractiveness": 0,
-                    "slimness": 0,
-                    "quirkiness": 0,
-                    "ethnicity_fit": 0,
-                    "composite": 0,
-                    "notes": "Vision scoring failed",
-                }
+                scores = vision_failure_scores(f"Vision scoring failed: {exception}")
 
             print(
                 "Vision scores =>",
@@ -135,8 +129,9 @@ def run_autoswipe(
             )
 
             comment_id = str(uuid.uuid4())
-            like_profile = should_like_profile(scores, settings)
+            like_profile, decision_reason = like_decision_reason(scores, settings)
             decision = "like" if like_profile else "pass"
+            print(f"Decision: {decision_reason}")
 
             store_profile_scores(
                 comment_id=comment_id,
@@ -173,16 +168,7 @@ def run_autoswipe(
                 # we never auto-send chat messages.
             else:
                 passed += 1
-                if (
-                    previous_profile_text == current_profile_text
-                    and current_profile_text != ""
-                ):
-                    print("Pass (same profile encountered again)")
-                else:
-                    print(
-                        f"Pass (composite={scores.get('composite')} "
-                        f"< {settings.min_composite} or below floors)"
-                    )
+                print(f"Pass — {decision_reason}")
                 tap(device, x_dislike_button, y_dislike_button)
                 print("Pass tapped at:", x_dislike_button, y_dislike_button)
 

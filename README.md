@@ -84,15 +84,19 @@ By integrating these components, the script can make automated decisions (like o
 ## Discover autoswipe
 
 Vision scores each profile (attractiveness / slimness / quirkiness / ethnicity_fit),
-builds a **composite** weighted average, then likes when composite and floors pass.
+builds a **composite** weighted average, then decides like/pass.
 
 **Composite formula** (weights from settings; ethnicity weight used only when a
 preference is set):
 
 ```text
 composite = Σ(weight_i × score_i) / Σ(weight_i)
-like if composite >= min_composite AND each configured floor passes
+LIKE if composite >= min_composite, OR near threshold, OR vision uncertain/error
+PASS only when composite is clearly below threshold
 ```
+
+Profile photo collection uses large vertical swipes (~60% of screen) between
+captures so vision frames are distinct.
 
 Settings persist to SQLite (`settings` table) and `app/data/autoswipe_settings.json`
 (non-secrets). Env vars in `.env` are defaults only.
@@ -103,17 +107,25 @@ cd app
 ../.venv/bin/python migrate.py
 ../.venv/bin/python setup_autoswipe.py --list-presets
 ../.venv/bin/python setup_autoswipe.py --preset asian_baddies
+# Apply Hinge Discover Ethnicity on the phone (sole device lock):
+../.venv/bin/python setup_autoswipe.py --dry-run-filters
+../.venv/bin/python setup_autoswipe.py --apply-filters
 ../.venv/bin/python setup_autoswipe.py --show
 ../.venv/bin/python setup_autoswipe.py --interactive
-# Run (exclusive device lock — do not overlap draft_replies/sync_chats):
+# Run autoswipe only after filters look right (do not overlap draft_replies):
 ../.venv/bin/python main.py --max-swipes 5 --no-paste
 ../.venv/bin/python autoswipe.py
 ```
 
-Preset `asian_baddies`: `min_composite=6`, attractiveness-heavy weights, vision
-preference `East/Southeast Asian`. **Hinge Discover ethnicity/race filters** (when
-your region exposes them) should be set manually once in the app — ADB cannot
-reliably drive that Filters UI. Automation stores the preference for scoring only.
+### Hinge Ethnicity tap path (UK)
+
+1. Discover feed → tap **Dating preferences** (top-left; content-desc).
+2. **Dating preferences** list → tap **Ethnicity** row (`co.hinge.app:id/button`).
+3. Check **East Asian** and **Southeast Asian** (Compose checkable rows).
+4. **Back to preferences list** → **Back to Settings** (returns to Discover).
+   No separate Save — selection persists on back.
+
+Preset `asian_baddies`: scoring `min_composite=6` plus UI filters via `--apply-filters`.
 Likes may generate a comment locally; chats are never auto-sent.
 
 ## Chat history + Your Turn drafting

@@ -5,8 +5,10 @@ Configure Discover autoswipe filters (CLI and/or interactive).
 Examples:
   python setup_autoswipe.py --show
   python setup_autoswipe.py --preset asian_baddies
+  python setup_autoswipe.py --apply-filters
+  python setup_autoswipe.py --apply-filters --ethnicity-labels "East Asian,Southeast Asian"
+  python setup_autoswipe.py --dry-run-filters
   python setup_autoswipe.py --interactive
-  python setup_autoswipe.py --min-composite 6 --ethnicity "East/Southeast Asian"
   python setup_autoswipe.py --list-presets
 """
 
@@ -148,6 +150,32 @@ def build_parser() -> argparse.ArgumentParser:
         dest="paste_comment",
         action="store_false",
     )
+    parser.add_argument(
+        "--apply-filters",
+        action="store_true",
+        help=(
+            "Drive Hinge Discover → Dating preferences → Ethnicity on the phone. "
+            "Default labels come from --filter-preset / asian_baddies "
+            "(East Asian + Southeast Asian)."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run-filters",
+        action="store_true",
+        help="Open Dating preferences and report current Ethnicity only (no changes).",
+    )
+    parser.add_argument(
+        "--filter-preset",
+        type=str,
+        default=None,
+        help="Ethnicity UI preset: asian_baddies, east_asian, southeast_asian, south_asian, open.",
+    )
+    parser.add_argument(
+        "--ethnicity-labels",
+        type=str,
+        default=None,
+        help='Comma-separated Hinge Ethnicity labels, e.g. "East Asian,Southeast Asian".',
+    )
     return parser
 
 
@@ -155,6 +183,58 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.apply_filters or args.dry_run_filters:
+        from hinge_filters import FilterNavigationError, run_apply_filters
+
+        labels = None
+        if args.ethnicity_labels:
+            labels = [p.strip() for p in args.ethnicity_labels.split(",") if p.strip()]
+        filter_preset = args.filter_preset
+        if filter_preset is None and args.preset:
+            filter_preset = args.preset
+        if filter_preset is None and not labels:
+            # Prefer saved autoswipe preset when it maps to ethnicity labels.
+            saved = load_settings().preset
+            filter_preset = saved if saved else "asian_baddies"
+        try:
+            result = run_apply_filters(
+                preset=filter_preset,
+                labels=labels,
+                dry_run=bool(args.dry_run_filters),
+            )
+        except FilterNavigationError as exc:
+            print(f"ERROR: {exc}")
+            return 2
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            return 2
+
+        if args.dry_run_filters:
+            print("Dry-run Dating preferences Ethnicity:")
+            print(f"  current: {result.get('current_summary')!r}")
+            print(f"  would_select: {result.get('would_select')}")
+            print(f"  options: {result.get('options')}")
+        else:
+            print("Applied Hinge Ethnicity filters:")
+            print(f"  selected: {result.get('selected')}")
+            print(f"  summary:  {result.get('summary')!r}")
+            print(f"  path:     {result.get('path')}")
+            # Keep vision preference aligned with UI labels.
+            settings = load_settings()
+            selected = result.get("selected") or []
+            if selected:
+                from autoswipe_config import AutoswipeSettings, save_settings, settings_field_names
+
+                data = settings.to_dict()
+                data["ethnicity_preference"] = " / ".join(selected)
+                save_settings(
+                    AutoswipeSettings(**{k: data[k] for k in settings_field_names()})
+                )
+                print(
+                    f"  saved ethnicity_preference={data['ethnicity_preference']!r}"
+                )
+        return 0
 
     if args.list_presets:
         for name in list_presets():

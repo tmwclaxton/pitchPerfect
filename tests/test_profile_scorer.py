@@ -72,13 +72,9 @@ class ProfileScorerTest(unittest.TestCase):
         # ethnicity weight ignored: (0.5*8 + 0.3*6 + 0.2*4) / 1.0 = 6.6
         self.assertEqual(6.6, compute_composite_score(scores, settings))
 
-    def test_should_like_profile_uses_composite_and_floors(self):
+    def test_should_like_biases_right_when_uncertain_or_near(self):
         settings = AutoswipeSettings(
             min_composite=6.0,
-            min_attractiveness=5.0,
-            min_slimness=4.0,
-            min_quirkiness=0.0,
-            min_ethnicity_fit=5.0,
             weight_attractiveness=0.5,
             weight_slimness=0.2,
             weight_quirkiness=0.1,
@@ -96,26 +92,18 @@ class ProfileScorerTest(unittest.TestCase):
         self.assertGreaterEqual(like_scores["composite"], 6.0)
         self.assertTrue(should_like_profile(like_scores, settings))
 
-        low_composite = {
-            "attractiveness": 5,
-            "slimness": 5,
-            "quirkiness": 5,
-            "ethnicity_fit": 5,
-            "notes": "mid",
-        }
-        low_composite["composite"] = compute_composite_score(low_composite, settings)
-        self.assertLess(low_composite["composite"], 6.0)
-        self.assertFalse(should_like_profile(low_composite, settings))
+        # Near threshold (5.4 with margin 0.75) → like.
+        near = {"composite": 5.4, "notes": "borderline", "uncertain": False}
+        self.assertTrue(should_like_profile(near, settings))
 
-        low_ethnicity = {
-            "attractiveness": 9,
-            "slimness": 8,
-            "quirkiness": 7,
-            "ethnicity_fit": 3,
-            "notes": "mismatch",
-        }
-        low_ethnicity["composite"] = compute_composite_score(low_ethnicity, settings)
-        self.assertFalse(should_like_profile(low_ethnicity, settings))
+        # Clearly below → pass.
+        low = {"composite": 4.0, "notes": "low", "uncertain": False}
+        self.assertFalse(should_like_profile(low, settings))
+
+        # Vision failure / uncertain → like.
+        from profile_scorer import vision_failure_scores
+
+        self.assertTrue(should_like_profile(vision_failure_scores(), settings))
 
     def test_score_profile_images_uses_nanogpt_vision(self):
         class FakeNanoGpt:

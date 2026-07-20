@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from autoswipe_config import AutoswipeSettings, load_settings
 from config import NANOGPT_VISION_MODEL
@@ -15,6 +15,9 @@ PROFILE_SCORE_SYSTEM_PROMPT = (
     "preference (use 5 if no preference was given); "
     "notes = one short sentence summarizing the person's look and vibe."
 )
+
+# Like when composite is within this distance below min_composite ("near threshold").
+NEAR_THRESHOLD_MARGIN = 0.75
 
 
 def _user_prompt(settings: AutoswipeSettings) -> str:
@@ -101,35 +104,103 @@ def score_profile_images(
     )
     scores = normalize_profile_scores(raw_scores)
     scores["composite"] = compute_composite_score(scores, cfg)
+    scores["uncertain"] = False
+    scores["vision_failed"] = False
     return scores
+
+
+def vision_failure_scores(reason: str = "Vision scoring failed") -> Dict[str, Any]:
+    """Placeholder scores that bias the swipe decision to LIKE."""
+    return {
+        "attractiveness": 0,
+        "slimness": 0,
+        "quirkiness": 0,
+        "ethnicity_fit": 0,
+        "composite": None,
+        "notes": reason,
+        "uncertain": True,
+        "vision_failed": True,
+    }
+
+
+def is_uncertain_scores(scores: Dict[str, Any]) -> bool:
+    if scores.get("vision_failed") or scores.get("uncertain"):
+        return True
+    notes = str(scores.get("notes") or "").lower()
+    if "vision scoring failed" in notes or "uncertain" in notes:
+        return True
+    # All-zero / missing composite after a failed normalize path.
+    if scores.get("composite") is None:
+        return True
+    return False
 
 
 def should_like_profile(
     scores: Dict[str, Any],
     settings: Optional[AutoswipeSettings] = None,
+    *,
+    near_margin: float = NEAR_THRESHOLD_MARGIN,
 ) -> bool:
     """
-    Like when composite meets threshold AND individual floors pass.
+    Bias to LIKE when unsure.
 
-    Floors for unused metrics can be set to 0 to rely on composite alone.
+    LIKE when:
+      - vision failed / uncertain, OR
+      - composite >= min_composite, OR
+      - composite is near the threshold (within near_margin below)
+
+    PASS only when composite is clearly below (composite < min_composite - margin).
+    Individual floors are soft: they never force a pass if composite is near/above.
     """
     cfg = settings or load_settings()
+
+    if is_uncertain_scores(scores):
+        return True
+
     composite = scores.get("composite")
     if composite is None:
-        composite = compute_composite_score(scores, cfg)
+        return True
+    try:
+        composite_f = float(composite)
+    except (TypeError, ValueError):
+        return True
 
-    if float(composite) < cfg.min_composite:
+    # Clear pass band only.
+    clear_pass_below = float(cfg.min_composite) - float(near_margin)
+    if composite_f < clear_pass_below:
         return False
-    if scores.get("attractiveness", 0) < cfg.min_attractiveness:
-        return False
-    if scores.get("slimness", 0) < cfg.min_slimness:
-        return False
-    if scores.get("quirkiness", 0) < cfg.min_quirkiness:
-        return False
-    if (cfg.ethnicity_preference or "").strip():
-        if scores.get("ethnicity_fit", 0) < cfg.min_ethnicity_fit:
-            return False
+
+    # At/above threshold, or near it → like.
     return True
+
+
+def like_decision_reason(
+    scores: Dict[str, Any],
+    settings: Optional[AutoswipeSettings] = None,
+    *,
+    near_margin: float = NEAR_THRESHOLD_MARGIN,
+) -> Tuple[bool, str]:
+    """Return (should_like, human reason) for logging."""
+    cfg = settings or load_settings()
+    if is_uncertain_scores(scores):
+        return True, "like (uncertain/vision error — bias right)"
+    composite = scores.get("composite")
+    try:
+        composite_f = float(composite)
+    except (TypeError, ValueError):
+        return True, "like (missing composite — bias right)"
+    if composite_f >= cfg.min_composite:
+        return True, f"like (composite {composite_f} >= {cfg.min_composite})"
+    clear_pass_below = float(cfg.min_composite) - float(near_margin)
+    if composite_f >= clear_pass_below:
+        return (
+            True,
+            f"like (composite {composite_f} near threshold {cfg.min_composite})",
+        )
+    return (
+        False,
+        f"pass (composite {composite_f} clearly < {cfg.min_composite})",
+    )
 
 
 def format_scores_for_comment(scores: Dict[str, Any]) -> str:
