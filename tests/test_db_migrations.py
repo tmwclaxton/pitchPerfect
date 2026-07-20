@@ -44,7 +44,8 @@ class MigrationsAndUpsertTest(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ]
-            self.assertEqual(versions, [1, 2])
+            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertIn("settings", tables)
             # Second run is a no-op.
             self.assertEqual(migrate_db(path), [])
             conn.close()

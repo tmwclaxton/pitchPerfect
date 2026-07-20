@@ -674,3 +674,44 @@ def load_all_you_messages(limit: int = 5000) -> List[Dict[str, Any]]:
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+# --- generic settings (autoswipe filters, non-secret prefs) ---
+
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+    if not row:
+        return default
+    return str(row["value"])
+
+
+def set_setting(key: str, value: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value, _utc_now()),
+        )
+
+
+def get_setting_json(key: str) -> Optional[Any]:
+    raw = get_setting(key)
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def set_setting_json(key: str, value: Any) -> None:
+    set_setting(key, json.dumps(value, indent=2))

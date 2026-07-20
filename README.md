@@ -71,6 +71,7 @@ By integrating these components, the script can make automated decisions (like o
    NANOGPT_API_KEY=your-api-key
    NANOGPT_BASE_URL=https://nano-gpt.com/api/v1
    NANOGPT_MODEL=deepseek/deepseek-v4-flash:throughput
+   NANOGPT_VISION_MODEL=openai/gpt-4.1-mini:speed
    ```
 
 2. **Install deps** (host / recommended for USB adb on macOS):
@@ -79,6 +80,41 @@ By integrating these components, the script can make automated decisions (like o
    source .venv/bin/activate
    pip install -r app/requirements.txt
    ```
+
+## Discover autoswipe
+
+Vision scores each profile (attractiveness / slimness / quirkiness / ethnicity_fit),
+builds a **composite** weighted average, then likes when composite and floors pass.
+
+**Composite formula** (weights from settings; ethnicity weight used only when a
+preference is set):
+
+```text
+composite = Σ(weight_i × score_i) / Σ(weight_i)
+like if composite >= min_composite AND each configured floor passes
+```
+
+Settings persist to SQLite (`settings` table) and `app/data/autoswipe_settings.json`
+(non-secrets). Env vars in `.env` are defaults only.
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+cd app
+../.venv/bin/python migrate.py
+../.venv/bin/python setup_autoswipe.py --list-presets
+../.venv/bin/python setup_autoswipe.py --preset asian_baddies
+../.venv/bin/python setup_autoswipe.py --show
+../.venv/bin/python setup_autoswipe.py --interactive
+# Run (exclusive device lock — do not overlap draft_replies/sync_chats):
+../.venv/bin/python main.py --max-swipes 5 --no-paste
+../.venv/bin/python autoswipe.py
+```
+
+Preset `asian_baddies`: `min_composite=6`, attractiveness-heavy weights, vision
+preference `East/Southeast Asian`. **Hinge Discover ethnicity/race filters** (when
+your region exposes them) should be set manually once in the app — ADB cannot
+reliably drive that Filters UI. Automation stores the preference for scoring only.
+Likes may generate a comment locally; chats are never auto-sent.
 
 ## Chat history + Your Turn drafting
 
