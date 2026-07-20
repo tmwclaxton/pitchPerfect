@@ -34,6 +34,7 @@ from helper_functions import (
     get_screen_resolution,
     open_discover,
     open_hinge,
+    swipe,
     tap,
 )
 from profile_images import collect_profile_images, ensure_images_dir
@@ -60,6 +61,28 @@ def _first_desc(nodes, *needles: str):
     return None
 
 
+def _find_like_button(device, width: int, height: int):
+    """
+    Locate Like photo / Like photo prompt after profile image collection.
+
+    collect_profile_images scrolls deep into the stack; reverse-scroll a few
+    times so a heart control is on-screen again.
+    """
+    x = width // 2
+    for attempt in range(7):
+        nodes = _discover_nodes(device)
+        like_btn = _first_desc(nodes, "Like photo", "Like photo prompt")
+        if like_btn is not None:
+            return like_btn
+        # First recover upward (finger swipe down), then hunt downward.
+        if attempt < 4:
+            swipe(device, x, int(height * 0.28), x, int(height * 0.78), 280)
+        else:
+            swipe(device, x, int(height * 0.78), x, int(height * 0.28), 280)
+        time.sleep(0.85)
+    return None
+
+
 def tap_discover_like(device, width: int, height: int) -> bool:
     """
     Like the current Discover profile via accessibility targets.
@@ -68,19 +91,23 @@ def tap_discover_like(device, width: int, height: int) -> bool:
     confirming with "Send like" after opening the like sheet.
     Never auto-sends chat messages — only the Discover like action.
     """
-    nodes = _discover_nodes(device)
-    like_btn = _first_desc(nodes, "Like photo", "Like photo prompt")
+    like_btn = _find_like_button(device, width, height)
     if like_btn is not None:
         tap_bounds(device, like_btn.bounds)
         print(f"Like tapped via UI: {like_btn.content_desc} {like_btn.bounds}")
     else:
-        x, y = int(width * 0.90), int(height * 0.67)
+        x, y = int(width * 0.86), int(height * 0.58)
         tap(device, x, y)
         print(f"Like tapped at fallback coords: {x}, {y}")
 
     time.sleep(1.2)
     nodes = _discover_nodes(device)
     send = _first_desc(nodes, "Send like")
+    if send is None:
+        # Sheet may need a moment, or like tap missed — retry once on any like.
+        time.sleep(0.6)
+        nodes = _discover_nodes(device)
+        send = _first_desc(nodes, "Send like")
     if send is None:
         print("Warning: Send like not found after like tap; pressing back.")
         press_back(device, settle_s=0.4, check_hinge=False)
@@ -96,13 +123,26 @@ def tap_discover_pass(device, width: int, height: int) -> bool:
     """Pass/skip the current Discover profile via Skip button when available."""
     nodes = _discover_nodes(device)
     skip = _first_desc(nodes, "Skip ")
+    if skip is None:
+        # Skip sits near the bottom; reverse-scroll once if we are mid-profile.
+        swipe(
+            device,
+            width // 2,
+            int(height * 0.30),
+            width // 2,
+            int(height * 0.75),
+            280,
+        )
+        time.sleep(0.8)
+        nodes = _discover_nodes(device)
+        skip = _first_desc(nodes, "Skip ")
     if skip is not None:
         tap_bounds(device, skip.bounds)
         print(f"Pass tapped via UI: {skip.content_desc} {skip.bounds}")
         time.sleep(1.0)
         return True
 
-    x, y = int(width * 0.15), int(height * 0.85)
+    x, y = int(width * 0.12), int(height * 0.83)
     tap(device, x, y)
     print(f"Pass tapped at fallback coords: {x}, {y}")
     time.sleep(1.0)
